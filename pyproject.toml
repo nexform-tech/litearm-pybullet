@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "litearm-pybullet"
+version = "0.1.0"
+description = "LiteArm 七轴机械臂 PyBullet 仿真 — API 与 litearm-python 兼容，支持仿真与实体同时运动"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+authors = [{ name = "luochun" }]
+keywords = ["robotics", "robot-arm", "litearm", "pybullet", "simulation"]
+dependencies = [
+    "pybullet>=3.2.5",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-timeout"]
+mirror = ["litearm-python"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"litearm_pybullet" = ["assets/*.urdf", "assets/meshes/*.STL"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v"

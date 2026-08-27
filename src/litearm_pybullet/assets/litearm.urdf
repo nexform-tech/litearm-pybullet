@@ -1,0 +1,506 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="litearm">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.0026186 -9.0951E-08 0.031068"
+        rpy="0 0 0" />
+      <mass
+        value="0.2213" />
+      <inertia
+        ixx="0.00033281"
+        ixy="1.851E-08"
+        ixz="1.5547E-05"
+        iyy="0.00036238"
+        iyz="-1.3607E-09"
+        izz="0.00033779" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="Link1">
+    <inertial>
+      <origin
+        xyz="-0.00032668 0.0032061 -0.0098688"
+        rpy="0 0 0" />
+      <mass
+        value="0.34369" />
+      <inertia
+        ixx="0.00037819"
+        ixy="-1.046E-06"
+        ixz="-1.8849E-06"
+        iyy="0.00036309"
+        iyz="-9.3595E-06"
+        izz="0.00032871" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint1"
+    type="revolute">
+    <origin
+      xyz="0 0 0.149"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="Link1" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.960822"
+      upper="2.960822"
+      effort="120.0"
+      velocity="20.0" />
+  </joint>
+  <link
+    name="Link2">
+    <inertial>
+      <origin
+        xyz="1.71962606360188E-06 -0.0717061760734794 -0.000646670496314539"
+        rpy="0 0 0" />
+      <mass
+        value="0.192491463122173" />
+      <inertia
+        ixx="0.000137502728006461"
+        ixy="-7.53065687197372E-09"
+        ixz="-1.88665720457263E-08"
+        iyy="6.79063317649751E-05"
+        iyz="-4.73136924082959E-07"
+        izz="0.00014535601947697" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint2"
+    type="revolute">
+    <origin
+      xyz="0 0 0"
+      rpy="-1.5708 0 3.1416" />
+    <parent
+      link="Link1" />
+    <child
+      link="Link2" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.758411"
+      upper="1.758411"
+      effort="120.0"
+      velocity="20.0" />
+  </joint>
+  <link
+    name="Link3">
+    <inertial>
+      <origin
+        xyz="0.00109932496223018 0.0223611463159505 0.140156516892673"
+        rpy="0 0 0" />
+      <mass
+        value="0.223742608463484" />
+      <inertia
+        ixx="0.000924913712923669"
+        ixy="-3.42229938369351E-06"
+        ixz="-9.6926891713139E-06"
+        iyy="0.000856697315654656"
+        iyz="-0.000199123076326273"
+        izz="0.000155668430489566" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint3"
+    type="revolute">
+    <origin
+      xyz="0 -0.1195 0"
+      rpy="1.5708 0 0" />
+    <parent
+      link="Link2" />
+    <child
+      link="Link3" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.952430"
+      upper="2.952430"
+      effort="28.0"
+      velocity="10.0" />
+  </joint>
+  <link
+    name="Link4">
+    <inertial>
+      <origin
+        xyz="-0.0525066113071744 -0.0339290978745716 0.000189270883684897"
+        rpy="0 0 0" />
+      <mass
+        value="0.346865845973422" />
+      <inertia
+        ixx="0.000274751625523292"
+        ixy="-7.30524326401112E-05"
+        ixz="-3.72030461599293E-06"
+        iyy="0.000406458153256775"
+        iyz="-2.6179803830391E-06"
+        izz="0.000345028154917492" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link4.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint4"
+    type="revolute">
+    <origin
+      xyz="-7E-05 0.038 0.18"
+      rpy="0 1.5708 0" />
+    <parent
+      link="Link3" />
+    <child
+      link="Link4" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-3.232770"
+      upper="0.963842"
+      effort="28.0"
+      velocity="10.0" />
+  </joint>
+  <link
+    name="Link5">
+    <inertial>
+      <origin
+        xyz="0.00016716174174322 -3.00535542858157E-06 0.0650221775206479"
+        rpy="0 0 0" />
+      <mass
+        value="0.0887382027421528" />
+      <inertia
+        ixx="0.000159589485887135"
+        ixy="-1.78419768734927E-08"
+        ixz="-8.7820467522042E-07"
+        iyy="0.000174854825822747"
+        iyz="-9.8321095085082E-08"
+        izz="3.22865580026908E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link5.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint5"
+    type="revolute">
+    <origin
+      xyz="-0.09145 -0.038 0"
+      rpy="-1.5708 0 1.5708" />
+    <parent
+      link="Link4" />
+    <child
+      link="Link5" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-2.952049"
+      upper="2.952049"
+      effort="10.0"
+      velocity="30.0" />
+  </joint>
+  <link
+    name="Link6">
+    <inertial>
+      <origin
+        xyz="-0.0310374840007515 -0.00110590862863162 -0.000966084392041207"
+        rpy="0 0 0" />
+      <mass
+        value="0.312523807012254" />
+      <inertia
+        ixx="0.000152270229956033"
+        ixy="-8.91058476322348E-06"
+        ixz="9.23167651357412E-06"
+        iyy="0.000410177650151355"
+        iyz="1.21275808870087E-07"
+        izz="0.000410422617679544" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link6.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link6.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint6"
+    type="revolute">
+    <origin
+      xyz="0.00025 0 0.131"
+      rpy="3.1416 1.5708 0" />
+    <parent
+      link="Link5" />
+    <child
+      link="Link6" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.579309"
+      upper="1.579309"
+      effort="10.0"
+      velocity="30.0" />
+  </joint>
+  <link
+    name="Link7">
+    <inertial>
+      <origin
+        xyz="7.43058037552946E-05 -0.0284235649897876 0.00113435968379042"
+        rpy="0 0 0" />
+      <mass
+        value="0.0665142816491545" />
+      <inertia
+        ixx="8.56425248682448E-05"
+        ixy="1.12765988909085E-07"
+        ixz="2.95839059668946E-09"
+        iyy="5.31281709359611E-05"
+        iyz="-7.14945432093654E-08"
+        izz="6.65701689995889E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link7.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/Link7.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="joint7"
+    type="revolute">
+    <origin
+      xyz="-0.062 -0.00031 0.00025"
+      rpy="1.5708 1.5708 0" />
+    <parent
+      link="Link6" />
+    <child
+      link="Link7" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.594759"
+      upper="1.594759"
+      effort="10.0"
+      velocity="30.0" />
+  </joint>
+  <link
+    name="ee_frame_link">
+    <inertial>
+      <origin
+        xyz="-7.42959555411108E-05 -0.00113435968379044 -0.0347955260741727"
+        rpy="0 0 0" />
+      <mass
+        value="0.0665142816491545" />
+      <inertia
+        ixx="8.56425248682448E-05"
+        ixy="2.95839059668932E-09"
+        ixz="1.12765988909086E-07"
+        iyy="6.65701689995889E-05"
+        iyz="-7.14945432093668E-08"
+        izz="5.31281709359611E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/ee_frame_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://litearm_description/meshes/jxbURDF260327/ee_frame_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="ee_joint"
+    type="fixed">
+    <origin
+      xyz="0 -0.063219 0"
+      rpy="-1.5708 0 3.1416" />
+    <parent
+      link="Link7" />
+    <child
+      link="ee_frame_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>

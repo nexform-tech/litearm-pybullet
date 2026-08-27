@@ -1,71 +1,70 @@
 # litearm-pybullet
 
-LiteArm 七轴机械臂 PyBullet 仿真。API 与 litearm-python SDK 完全兼容（已内置），
-支持仿真与实体机械臂同时运动。
+Official PyBullet-based simulation environment for the **LiteArm 7-DOF robotic arm**.
+Fully API-compatible with `litearm-python` — swap `Arm` with `PyBulletArm` and your
+control code runs identically in simulation and on hardware.
 
-## 特点
+## Features
 
-- 🔄 **API 兼容**：与 litearm-python 相同的接口，`PyBulletArm` 可直接替换 `Arm`
-- 🖥️ **三种模式**：独立仿真 / 镜像跟随 / 双控同步
-- 🎮 **可视化**：PyBullet 原生渲染，实时观察机械臂运动
-- 🧪 **无硬件测试**：不连真实机械臂也能开发和测试运动逻辑
-- 🐍 **纯 Python**：零编译，pip install 即用
+- 🔄 **Drop-in API compatibility** — Same interface as `litearm-python`. `PyBulletArm` replaces `Arm` directly.
+- 🖥️ **Three operating modes** — Standalone simulation / Mirror tracking / Dual control
+- 🎮 **Native PyBullet rendering** — Real-time visualization of arm motion
+- 🧪 **No hardware required** — Develop and test motion logic without a physical arm
+- 🐍 **Pure Python** — Zero compilation. `pip install` and go.
 
-## 安装
+## Installation
 
 ```bash
-# 独立仿真（无需真机通信）
+# Standalone simulation (no hardware needed)
 pip install litearm-pybullet
 
-# 镜像/双控模式（需要真机通信）
+# Mirror / Dual control mode (requires hardware connectivity)
 pip install "litearm-pybullet[mirror]"
 ```
 
-或从源码安装：
+Or from source:
 
 ```bash
-git clone https://gitee.com/xxx/litearm-pybullet.git
+git clone https://github.com/nexform-tech/litearm-pybullet.git
 cd litearm-pybullet
 pip install -e ".[dev]"
 ```
 
-## 快速开始
+## Quick Start
 
-### 模式 1：独立仿真
+### Mode 1 — Standalone Simulation
 
 ```python
 from litearm_pybullet import PyBulletArm
 
 with PyBulletArm(render=True) as arm:
-    # 关节运动
+    # Joint-space motion
     arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.2)
 
-    # 笛卡尔直线运动
+    # Cartesian straight-line motion
     pos, R = arm.get_tcp_pose()
     arm.movel([[pos[0], pos[1], pos[2] - 0.1], R], speed=0.1)
 
-    # 读取状态
+    # Read state
     state = arm.get_state()
     print(state["q"])
 ```
 
-### 模式 2：镜像模式 — 仿真跟随实臂
+### Mode 2 — Mirror Mode (sim follows real arm)
 
 ```python
 from litearm_pybullet import litearm, PyBulletArm
 
-# 连接真实机械臂
+# Connect to real arm
 real = litearm.Arm(endpoint="tcp/192.168.31.139:7447")
 
-# 创建仿真并启动镜像
+# Create simulation and start mirroring
 sim = PyBulletArm(render=True)
 sim.start()
-sim.mirror_from(real)  # 仿真跟随实臂同步运动
-
-# 此时在实臂上做任何操作，仿真都会实时跟随
+sim.mirror_from(real)  # sim tracks real arm in real time
 ```
 
-### 模式 3：双控模式 — 同时控制
+### Mode 3 — Dual Control (control both simultaneously)
 
 ```python
 from litearm_pybullet import DualArm
@@ -73,44 +72,44 @@ from litearm_pybullet import DualArm
 dual = DualArm(real_endpoint="tcp/192.168.31.139:7447", render=True)
 dual.start()
 
-# 一条命令，实臂和仿真同时运动！
+# One command — both arms move!
 dual.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.2)
 
 dual.close()
 ```
 
-## 架构
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                  你的 Python 程序                │
+│               Your Python Program                │
 │                                                   │
-│   arm = PyBulletArm()  ← 可替换为 litearm.Arm    │
+│   arm = PyBulletArm()  ← can replace litearm.Arm │
 │   arm.movej(...)                                  │
 │   arm.get_state()                                 │
 └──────────┬────────────────────┬─────────────────┘
            │                    │
     ┌──────▼──────┐      ┌─────▼──────────┐
-    │ 独立仿真     │      │ 双控 / 镜像     │
-    │             │      │                │
-    │ PyBullet    │      │ PyBullet+Zenoh │
-    │ 物理引擎    │      │ → litearm-     │
-    │             │      │   server       │
-    │ PID 控制器  │      │                │
-    │ FK/IK      │      │  实臂 + 仿真   │
-    │             │      │  同时运动      │
-    └─────────────┘      └────────────────┘
+    │ Standalone   │      │ Dual / Mirror   │
+    │ Simulation   │      │                 │
+    │              │      │ PyBullet +      │
+    │ PyBullet     │      │ litearm-python  │
+    │ physics      │      │                 │
+    │ engine       │      │ Real + Sim      │
+    │ PID ctrl     │      │ together        │
+    │ FK/IK        │      │                 │
+    └──────────────┘      └─────────────────┘
 ```
 
-## 示例
+## Examples
 
-| 样例 | 说明 | 需要实臂 |
-|------|------|----------|
-| `01_hello_sim.py` | 创建仿真 + 读状态 | ❌ |
-| `02_movej_sim.py` | 关节/笛卡尔运动 + FK/IK | ❌ |
-| `03_trajectory.py` | 轨迹录制与回放 | ❌ |
-| `04_mirror_real.py` | 仿真镜像跟随实臂 | ✅ |
-| `05_dual_control.py` | 同时控制实臂和仿真 | ✅ |
+| Example | Description | Needs real arm |
+|---------|-------------|:---:|
+| `01_hello_sim.py` | Create simulation + read state | ❌ |
+| `02_movej_sim.py` | Joint & Cartesian motion + FK/IK | ❌ |
+| `03_trajectory.py` | Record & replay trajectories | ❌ |
+| `04_mirror_real.py` | Sim mirrors real arm | ✅ |
+| `05_dual_control.py` | Control both arms simultaneously | ✅ |
 
 ```bash
 python3 examples/01_hello_sim.py
@@ -120,26 +119,30 @@ python3 examples/04_mirror_real.py --endpoint tcp/192.168.31.139:7447
 python3 examples/05_dual_control.py --endpoint tcp/192.168.31.139:7447
 ```
 
-## API 对照
+## API Reference
 
-| litearm.Arm | PyBulletArm | 说明 |
-|-------------|-------------|------|
-| `Arm(endpoint=...)` | `PyBulletArm(render=True)` | 创建实例 |
-| `movej(q, speed)` | `movej(q, speed)` | ✅ 相同 |
-| `movel(pose, speed)` | `movel(pose, speed)` | ✅ 相同 |
-| `movec(via, goal)` | `movec(via, goal)` | ✅ 相同 |
-| `movep(poses)` | `movep(poses)` | ✅ 相同 |
-| `get_state()` | `get_state()` | ✅ 相同 |
-| `get_tcp_pose()` | `get_tcp_pose()` | ✅ 相同 |
-| `fk(q)` | `fk(q)` | ✅ 相同 |
-| `ik(pos, R)` | `ik(pos, R)` | ✅ 相同 |
-| `request_stop()` | `request_stop()` | ✅ 相同 |
-| `enable/disable()` | `enable/disable()` | ✅ 相同 |
-| `set_gains(kp, kd)` | `set_gains(kp, kd)` | ✅ 相同 |
-| `device("hand_0")` | `device("hand_0")` | ✅ 模拟 |
-| `arm.hand.open()` | `arm.hand.open()` | ✅ 模拟 |
+| litearm.Arm | PyBulletArm | Notes |
+|-------------|-------------|-------|
+| `Arm(endpoint=...)` | `PyBulletArm(render=True)` | Constructor |
+| `movej(q, speed)` | `movej(q, speed)` | ✅ Identical |
+| `movel(pose, speed)` | `movel(pose, speed)` | ✅ Identical |
+| `movec(via, goal)` | `movec(via, goal)` | ✅ Identical |
+| `movep(poses)` | `movep(poses)` | ✅ Identical |
+| `get_state()` | `get_state()` | ✅ Identical |
+| `get_tcp_pose()` | `get_tcp_pose()` | ✅ Identical |
+| `fk(q)` | `fk(q)` | ✅ Identical |
+| `ik(pos, R)` | `ik(pos, R)` | ✅ Identical |
+| `replay_joint_path(path)` | `replay_joint_path(path)` | ✅ Identical |
+| `replay_trajectory(traj)` | `replay_trajectory(traj)` | ✅ Identical |
+| `record_trajectory()` | `record_trajectory()` | ✅ Simulated |
+| `hold()` / `zero_gravity()` | `hold()` / `zero_gravity()` | ✅ Identical |
+| `request_stop()` | `request_stop()` | ✅ Identical |
+| `enable/disable()` | `enable/disable()` | ✅ Identical |
+| `set_gains(kp, kd)` | `set_gains(kp, kd)` | ✅ Identical |
+| `device("hand_0")` | `device("hand_0")` | ✅ Simulated proxy |
+| `arm.hand.open()` | `arm.hand.open()` | ✅ Simulated proxy |
 
-## 开发
+## Development
 
 ```bash
 pip install -e ".[dev]"
@@ -149,3 +152,7 @@ python -m pytest tests/ -v
 ## License
 
 Proprietary
+
+---
+
+[中文文档](README_zh-CN.md) | [Developer Guide](docs/DEVELOPER_GUIDE.md)

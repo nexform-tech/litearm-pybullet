@@ -2,11 +2,15 @@
 # -*- coding: utf-8 -*-
 """样例 03 · 轨迹录制与回放 — 录制仿真运动轨迹，然后回放
 
+录制/回放是**仿真独有**的：litearm-core 的运动接口是"给目标、等到位"，
+没有"把一段带时间的关节轨迹录下来再放一遍"这回事。
+
 演示:
-  arm.record_trajectory()            录制仿真运动轨迹
+  arm.record_trajectory()            采样一段仿真轨迹（采样期间位置环是断开的，
+                                     录到的是臂自由状态下的运动）
   arm.replay_trajectory(traj)        回放录制的轨迹
-  traj.save("path.json")            保存轨迹到文件
-  JointTrajectory.load("path.json") 从文件加载轨迹
+  traj.save("path.json")             保存轨迹到文件
+  JointTrajectory.load("path.json")  从文件加载轨迹
 
 运行:
   python3 examples/03_trajectory.py
@@ -17,8 +21,7 @@ from litearm_pybullet import JointTrajectory, PyBulletArm
 
 
 def main():
-    arm = PyBulletArm(render=True)
-    arm.start()
+    arm = PyBulletArm(render=True).connect()
     time.sleep(0.5)
 
     try:

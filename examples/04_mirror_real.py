@@ -3,64 +3,67 @@
 """样例 04 · 镜像模式 — 仿真跟随真实机械臂同步运动
 
 前提:
-  1. 机械臂控制器上 litearm-server 已启动
-  2. 客户端与控制器网络互通
-  3. 客户端已安装 litearm-python (pip install litearm-pybullet[mirror])
+  1. 机械臂已通过 USB 接上（CDC 串口）
+  2. 客户端已装 litearm-core（未上 PyPI，从源码装）:
+       pip install -e ../litearm-core
 
 运行:
-  python3 examples/04_mirror_real.py --endpoint tcp/192.168.31.139:7447
+  python3 examples/04_mirror_real.py                 # 自动找 CDC 串口
+  python3 examples/04_mirror_real.py --port /dev/ttyACM0
 """
 import argparse
 import time
 
-from litearm_pybullet import PyBulletArm, litearm
+import litearm_core as pa
+
+from litearm_pybullet import PyBulletArm
 
 
 def main():
     ap = argparse.ArgumentParser(description="仿真镜像真实机械臂")
-    ap.add_argument("--endpoint", default="tcp/192.168.31.139:7447",
-                    help="litearm-server 的 zenoh 端点")
-    ap.add_argument("--arm-id", default="armA", help="Arm 标识")
+    ap.add_argument("--port", default=None,
+                    help="真臂串口 (缺省: 自动查找唯一的 STM32 CDC 设备)")
+    ap.add_argument("--rate-hz", type=float, default=50.0,
+                    help="镜像轮询频率 (每帧都要过一次串口, 别调太高)")
     args = ap.parse_args()
 
-    # 连接真实机械臂
-    real = litearm.Arm(endpoint=args.endpoint, arm_id=args.arm_id)
-    print(f"[实臂] 已连接 · endpoint={args.endpoint}")
+    # 连接真实机械臂。litearm-core 直连固件，没有 server/endpoint 这一层
+    real = pa.Arm(port=args.port).connect()
+    print(f"[实臂] 已连接 · port={args.port or '(自动查找)'} "
+          f"firmware={real.firmware} n={real.n}")
 
     # 创建仿真
-    sim = PyBulletArm(render=True)
-    sim.start()
+    sim = PyBulletArm(render=True).connect()
 
     try:
-        time.sleep(1.0)
-        real_state = real.get_state()
-        if real_state is None:
-            print("[实臂] 未收到状态，检查 server 是否在运行")
+        # 开始镜像：把实臂当前姿态搬进仿真，然后持续跟随
+        sim.mirror_from(real, rate_hz=args.rate_hz)
+        # 镜像在自己的线程里跑，失败不会抛到这里；等它试过第一帧再看
+        time.sleep(0.5)
+        if sim.mirror_error is not None:
+            print(f"[镜像] 没拿到实臂状态: {sim.mirror_error}")
+            print("       检查串口/固件，或 --rate-hz 调低")
             return
 
-        q_real = real_state["q"]
-        print(f"[实臂] 初始关节角: {[round(x, 3) for x in q_real]}")
-
-        # 将仿真初始化为实臂当前姿态
-        sim.set_joint_positions(q_real)
-        sim._controller.set_target(q_real)
-
-        # 开始镜像
-        sim.mirror_from(real)
         print("\n镜像模式已启动 — 仿真跟随实臂运动")
         print("   在实臂上执行操作（拖动/运动），观察仿真同步")
         print("   按 Ctrl+C 退出\n")
 
         while True:
             time.sleep(1)
-            r_state = real.get_state()
-            s_state = sim.get_state()
-            if r_state and s_state:
-                err = max(abs(r_state["q"][i] - s_state["q"][i])
-                          for i in range(7))
-                print(f"  实臂 q[0]={r_state['q'][0]:.4f}  "
-                      f"仿真 q[0]={s_state['q'][0]:.4f}  "
-                      f"误差={err:.4f} rad", end="\r")
+            # refresh=True: 每次都要"此刻"的一帧。refresh=False 回的是本调用方
+            # 上一次读到的那帧，镜像里用它只会一直打印同一个姿态
+            r_msg = real.get_state(refresh=True)
+            s_msg = sim.get_state()
+            if r_msg.value is None:
+                print(f"  实臂无回帧 (mirror_error={sim.mirror_error})", end="\r")
+                continue
+            q_real, q_sim = r_msg.value.q, s_msg.value.q
+            err = max(abs(q_real[i] - q_sim[i]) for i in range(min(len(q_real),
+                                                                   len(q_sim))))
+            print(f"  实臂 q[0]={q_real[0]:.4f}  "
+                  f"仿真 q[0]={q_sim[0]:.4f}  "
+                  f"误差={err:.4f} rad", end="\r")
 
     except KeyboardInterrupt:
         print("\n\n用户中断")

@@ -1,18 +1,27 @@
 """PyBulletArm — PyBullet simulation of the LiteArm 7-DOF robot.
 
-API-compatible with litearm.Arm. You can swap between real and simulated arms
-without changing your control code:
+API-compatible with ``litearm_core.Arm``. You can swap between real and
+simulated arms without changing your control code:
 
     # Real arm
-    arm = litearm.Arm(endpoint="tcp/192.168.31.139:7447")
+    arm = litearm_core.Arm(port=None).connect()   # first USB CDC device
 
     # Simulation
     arm = PyBulletArm()
 
     # Same API for both:
-    arm.movej([0.0]*7, speed=0.5)
-    state = arm.get_state()
+    arm.movej([0.0] * 7, speed=0.5)      # -> RobotState
+    state = arm.get_state().value        # -> RobotState
+    tcp = arm.get_tcp().value            # -> (x, y, z, roll, pitch, yaw)
     arm.close()
+
+Reads are wrapped in :class:`~litearm_pybullet.Msg` exactly as in litearm-core
+2.x: the getters that return "the latest frame" hand back ``Msg(value, hz,
+timestamp)``, so callers write ``.value`` on both sides.
+
+Simulation-only extras (no litearm-core counterpart) are marked as such in
+their docstrings: ``fk`` for an arbitrary configuration, ``plan_*``,
+``record_trajectory``/``play_trajectory`` and the ``device``/``hand`` proxies.
 """
 from __future__ import annotations
 
@@ -20,14 +29,29 @@ import os
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pybullet as p
 
+from ._compat import (
+    FLAG_ENABLED_BIT,
+    MODE_NAMES,
+    IKError,
+    InvalidCommandError,
+    JointState,
+    Msg,
+    RobotState,
+    as_pose,
+    mat_to_rpy,
+    rpy_to_mat,
+)
 from .controller import DEFAULT_KD, DEFAULT_KP, N_JOINTS, JointPIDController, TrajectoryGenerator
-from .kinematics import Kinematics
+# `_rotation_error` is the solver's own rotation metric; using it here too keeps
+# "did we arrive" measured the same way the optimizer measured it.
+from .kinematics import Kinematics, _rotation_error
 
 # Path to the default URDF model
 _ASSETS_DIR = Path(__file__).parent / "assets"
@@ -42,6 +66,58 @@ TAU_MAX = np.array([78.0, 78.0, 21.0, 21.0, 10.0, 10.0, 10.0])
 # Inertia patch: URDF distal links have near-zero inertia; pad for stable PD
 _MIN_INERTIA = 0.01
 _MIN_MASS = 0.5
+
+# Firmware mode ids, by the names litearm_core's MODE_NAMES uses.
+_MODE_INIT = 0
+_MODE_MOVE_J = 1
+_MODE_MOVE_P = 2
+_MODE_EMERGENCY = 6
+_MODE_ZERO_G = 7
+
+# flags bit10 = cartesian motion in progress.  litearm-core publishes no named
+# constant for it: the only way to read it is RobotState.cart_busy, and it is
+# deliberately kept out of FLAG_NAMES (those are safety flags).
+_FLAG_CART_BUSY_BIT = 10
+
+# Simulated motor/coil temperatures.  The simulation has no thermal model, so
+# every joint reports ambient — a constant that cannot be mistaken for a
+# measurement.
+_AMBIENT_C = 25.0
+
+# What "this pose is reachable" means for `ik()`.  The DLS/LM solver reports
+# success whenever it produced a finite in-limit configuration, so without a
+# residual check it answers a target 10 m away with a confident-looking q and
+# `except IKError` never fires — the sim would silently accept what the
+# firmware refuses.  Measured on this model: a reachable pose lands at ~7 mm /
+# 7 mrad, a pose 0.5 m out of reach at ~97 mm / 151 mrad.  The thresholds sit
+# in that gap, with a few times the margin on either side.
+_IK_POS_TOL = 0.02   # m
+_IK_ROT_TOL = 0.05   # rad
+
+
+class _FrameStats:
+    """Arrival statistics for one kind of frame, feeding ``Msg.hz``/``Msg.timestamp``.
+
+    Mirrors the bookkeeping litearm-core's ``Msg`` documents: ``hz`` is the
+    average rate over a short recent window (not a lifetime average, which
+    would take forever to react to a rate change), ``timestamp`` the local
+    ``time.monotonic()`` of the most recent frame, ``0.0`` if none yet.
+    """
+
+    def __init__(self, window: int = 32) -> None:
+        self._ts: Deque[float] = deque(maxlen=window)
+
+    def note(self) -> None:
+        self._ts.append(time.monotonic())
+
+    def hz(self) -> float:
+        if len(self._ts) < 2:
+            return 0.0
+        span = self._ts[-1] - self._ts[0]
+        return (len(self._ts) - 1) / span if span > 0 else 0.0
+
+    def timestamp(self) -> float:
+        return self._ts[-1] if self._ts else 0.0
 
 
 def _resolve_model_path(model_path: Optional[str] = None) -> str:
@@ -123,20 +199,21 @@ def _read_joint_state(body_id, joint_ids, client_id):
 class PyBulletArm:
     """PyBullet simulation of LiteArm 7-DOF robot arm.
 
-    API-compatible with litearm.Arm. All motion methods are blocking (they run
-    the simulation until the motion completes), matching the real arm's behavior.
+    API-compatible with ``litearm_core.Arm``: same method names, same argument
+    names and units, same return types, same exceptions. All motion methods are
+    blocking — they step the simulation until the motion arrives — matching the
+    real arm's behaviour.
 
     Usage::
 
         # Standalone simulation
         with PyBulletArm(render=True) as arm:
-            arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.2)
-            state = arm.get_state()
-            print(state["q"])
+            state = arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.2)
+            print(state.q)
 
         # Mirror real arm
-        import litearm
-        real = litearm.Arm(endpoint="tcp/192.168.31.139:7447")
+        import litearm_core
+        real = litearm_core.Arm(port=None).connect()
         sim = PyBulletArm(render=True)
         sim.start()
         sim.mirror_from(real)  # sim follows real arm state
@@ -152,6 +229,10 @@ class PyBulletArm:
         max_velocity: float = 3.0,
         n_joints: int = N_JOINTS,
         key_callback: Optional[Callable[[int], None]] = None,
+        q_tol: float = 0.03,
+        dq_tol: float = 0.10,
+        arrive_frames: int = 3,
+        move_timeout: float = 15.0,
     ) -> None:
         """Initialize the PyBullet simulation.
 
@@ -164,6 +245,13 @@ class PyBulletArm:
             max_velocity: Maximum joint velocity (rad/s).
             n_joints: Number of joints (default 7).
             key_callback: Optional callback for keyboard events.
+            q_tol: Arrival tolerance on joint position (rad), same name and
+                meaning as litearm_core's ``Arm(q_tol=...)``.
+            dq_tol: Arrival tolerance on joint velocity (rad/s).
+            arrive_frames: Consecutive frames that must satisfy both tolerances
+                before a motion counts as arrived.
+            move_timeout: Seconds after which an unfinished motion raises
+                ``MotionTimeoutError``.
         """
         model_path = _resolve_model_path(model_path)
         model_path = _resolve_urdf(model_path)
@@ -201,6 +289,19 @@ class PyBulletArm:
         self._stopped = False
         self._enabled = True
 
+        # Motion state, reported through RobotState the way the firmware
+        # reports its own: one mode variable plus the cartesian-busy bit.
+        self._mode = _MODE_INIT
+        self._cart_busy = False
+        self._seq = 0
+        self._last_tau = np.zeros(n_joints)
+
+        # Arrival criteria (litearm-core names and defaults)
+        self._q_tol = float(q_tol)
+        self._dq_tol = float(dq_tol)
+        self._arrive_frames = int(arrive_frames)
+        self._move_timeout = float(move_timeout)
+
         # Mirror mode
         self._mirror_arm: Optional[Any] = None
         self._mirror_thread: Optional[threading.Thread] = None
@@ -210,7 +311,9 @@ class PyBulletArm:
         self._devices: Optional[Any] = None
 
         self._controller.set_target(np.zeros(n_joints))
-        self._state_cache: Optional[dict] = None
+        self._state_cache: Optional[RobotState] = None
+        self._frames_status = _FrameStats()
+        self._frames_tcp = _FrameStats()
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -291,12 +394,15 @@ class PyBulletArm:
                     self._body, self._joints, p.TORQUE_CONTROL,
                     forces=list(tau_clipped), physicsClientId=self._cid,
                 )
+                self._last_tau = tau_clipped
 
                 # Step physics
                 p.stepSimulation(physicsClientId=self._cid)
 
-                # Update state cache
-                self._state_cache = self._build_state_dict()
+                # Update state cache: this loop *is* the simulated status
+                # stream, so every step produces one frame.
+                self._state_cache = self._build_robot_state()
+                self._frames_status.note()
 
             # Real-time sync
             elapsed = time.time() - loop_start
@@ -305,78 +411,174 @@ class PyBulletArm:
 
     # ── State Reading ──────────────────────────────────────────────────────────
 
-    def get_state(self, refresh: bool = False) -> Optional[dict]:
-        """Get latest robot state.
+    def get_state(self, refresh: bool = False, timeout: float = 0.5) -> Msg:
+        """Latest robot state, wrapped in a :class:`Msg`.
 
-        Returns state dict matching litearm.Arm.get_state() format:
-        {q, dq, tau, fault, errs, temps, state, feedback, watchdog, ...}
+        ``refresh`` forces a freshly built frame; ``timeout`` is accepted for
+        signature parity with ``litearm_core.Arm.get_state`` and is unused here
+        — the simulation always has a state to read, so unlike the real arm
+        this getter cannot come back empty (``Msg.value`` is never ``None``).
+
+        Read ``.value`` for the :class:`RobotState`: ``.value.q``,
+        ``.value.dq``, ``.value.tau``, ``.value.mode_name``, ``.value.enabled``,
+        ``.value.faulted``.
         """
         with self._lock:
-            if self._state_cache is None:
-                self._state_cache = self._build_state_dict()
-            return dict(self._state_cache)
+            if self._state_cache is None or refresh:
+                self._state_cache = self._build_robot_state()
+            value = self._state_cache
+        return self._msg(value, self._frames_status)
 
-    def _build_state_dict(self) -> dict:
-        """Build a state dict from current PyBullet data."""
-        q, dq = np.zeros(self._n_joints), np.zeros(self._n_joints)
-        for i, jid in enumerate(self._joints):
-            st = p.getJointState(self._body, jid, physicsClientId=self._cid)
-            q[i] = st[0]
-            dq[i] = st[1]
+    def get_status_now(self, timeout: float = 0.5) -> Msg:
+        """State read that is guaranteed to be of this instant.
 
-        state_str = "ready"
+        On the real arm this actively requests a frame instead of consuming the
+        passive stream, which is how you tell "the link is alive" from "the
+        stream stopped". The simulation has no passive stream to fall behind:
+        every read is a live PyBullet read, so both getters return a frame from
+        *now* and ``value`` is never ``None``.
+        """
+        return self.get_state(refresh=True, timeout=timeout)
+
+    def _build_robot_state(self) -> RobotState:
+        """Snapshot the current PyBullet state as a litearm-core RobotState.
+
+        Caller holds ``self._lock``.
+        """
+        q, dq = _read_joint_state(self._body, self._joints, self._cid)
+        self._seq = (self._seq + 1) & 0xFFFF
+        mode = self._mode_now()
+        joints = [
+            JointState(
+                q=float(q[i]),
+                dq=float(dq[i]),
+                tau=float(self._last_tau[i]),
+                # No thermal model in the simulation: report ambient rather
+                # than a number that looks measured.
+                t_mos=_AMBIENT_C,
+                t_coil=_AMBIENT_C,
+                err=0,
+            )
+            for i in range(self._n_joints)
+        ]
+        flags = 0
+        if self._enabled:
+            flags |= 1 << FLAG_ENABLED_BIT
+        if self._cart_busy:
+            flags |= 1 << _FLAG_CART_BUSY_BIT
+        return RobotState(
+            mode=mode,
+            mode_name=MODE_NAMES.get(mode, str(mode)),
+            flags=flags,
+            # The simulation raises no safety flags. A stop is reported through
+            # mode=EMERGENCY (hence RobotState.faulted), not by inventing a
+            # FAULT bit the firmware would not have set.
+            flag_names=[],
+            seq=self._seq,
+            joints=joints,
+            joint_fault=0,
+        )
+
+    def _mode_now(self) -> int:
+        """Current firmware-style mode id.
+
+        EMERGENCY dominates: the stop latch overrides whatever mode the arm was
+        in, the same precedence the firmware gives it.
+        """
         if self._stopped:
-            state_str = "stopping"
-        elif not self._enabled:
-            state_str = "disconnected"
+            return _MODE_EMERGENCY
+        return self._mode
 
-        return {
-            "q": q.tolist(),
-            "dq": dq.tolist(),
-            "tau": [0.0] * self._n_joints,
-            "fault": [],
-            "errs": [0] * self._n_joints,
-            "temps": [(i, 25) for i in range(self._n_joints)],
-            "state": state_str,
-            "feedback": {
-                "max_age_s": 0.001,
-                "joints": [
-                    {"joint": i, "received": 1000, "age_s": 0.001, "fresh": True}
-                    for i in range(self._n_joints)
-                ],
-                "stale_joints": [],
-            },
-            "watchdog": {
-                "enabled": True,
-                "timeout_s": 0.5,
-                "mode": "stop",
-                "tripped": self._stopped,
-                "last_kick_age_s": 0.001,
-            },
-            "robot_serial": "PYBULLET-SIM-001",
-            "config_checksum_sha256": "sim",
-        }
+    def _msg(self, value: Any, stats: _FrameStats) -> Msg:
+        return Msg(value=value, hz=stats.hz(), timestamp=stats.timestamp())
 
-    def get_tcp_pose(self) -> Tuple[List[float], List[List[float]]]:
-        """Get current TCP pose as (position, rotation_matrix)."""
+    def get_tcp(self, timeout: float = 0.6) -> Msg:
+        """TCP pose as ``Msg`` with ``value = (x, y, z, roll, pitch, yaw)``.
+
+        Same six-number shape and ZYX-extrinsic-free convention as
+        ``litearm_core.Arm.get_tcp``. ``timeout`` is accepted for parity and
+        unused — the simulation always answers.
+        """
         with self._lock:
             q, _ = _read_joint_state(self._body, self._joints, self._cid)
-        return self._kinematics.fk(q.tolist())
+            pos, R = self._kinematics.fk(q.tolist())
+        self._frames_tcp.note()
+        return self._msg(tuple(list(pos) + mat_to_rpy(R)), self._frames_tcp)
+
+    def get_tcp_pose(self) -> Tuple[List[float], List[List[float]]]:
+        """Deprecated: use ``get_tcp()``, which is what litearm_core calls it.
+
+        Kept because the 0.1 API returned ``(position, rotation_matrix)`` and
+        callers still want a matrix. The rotation is rebuilt from the same
+        rpy the SDK reports, so both spellings agree by construction.
+        """
+        rpy = self.get_tcp().value
+        return list(rpy[:3]), rpy_to_mat(rpy[3:])
+
+    @property
+    def n(self) -> int:
+        """Number of joints (litearm_core's name for it)."""
+        return self._n_joints
+
+    @property
+    def firmware(self) -> str:
+        """Simulated firmware banner, in the SDK's ``<name>-<n>J`` shape.
+
+        Plainly not a real version string: nothing here can be flashed, and
+        code that branches on firmware versions is not running against it.
+        """
+        return f"PyBulletSim-{self._n_joints}J"
 
     # ── Pure Computation (no simulation step needed) ───────────────────────────
 
     def fk(self, q: List[float]) -> Tuple[List[float], List[List[float]]]:
-        """Forward kinematics: joint angles → (position, rotation_matrix)."""
+        """Forward kinematics: joint angles → (position, rotation_matrix).
+
+        Simulation-only: litearm_core has no FK for an arbitrary configuration
+        (the firmware only reports the TCP of the pose it is actually in).
+        """
         return self._kinematics.fk(q)
 
     def ik(
         self,
-        pos_d: List[float],
-        R_d: List[List[float]],
-        q_seed: Optional[List[float]] = None,
-    ) -> Tuple[List[float], bool]:
-        """Inverse kinematics: (position, rotation) → (q, success)."""
-        return self._kinematics.ik(pos_d, R_d, q_seed)
+        pose: Sequence[float],
+        q_seed: Optional[Sequence[float]] = None,
+        timeout: float = 3.0,
+    ) -> List[float]:
+        """Inverse kinematics: ``pose`` → ``q[7]``; failure raises ``IKError``.
+
+        Accepts what ``litearm_core.Arm.ik`` accepts — ``[x, y, z, roll, pitch,
+        yaw]`` — plus, because the simulation can be asked about a pose it is
+        not standing in, the ``(position[3], R[3x3])`` and 4x4 forms
+        :func:`as_pose` normalizes.
+
+        ``q_seed`` defaults to the current joint configuration (the real arm
+        seeds from its measured state too). ``timeout`` is unused here: the
+        solver is local and cannot time out, only fail.
+        """
+        pos_d, R_d = as_pose(pose)
+        if q_seed is None:
+            with self._lock:
+                q_seed = _read_joint_state(
+                    self._body, self._joints, self._cid)[0].tolist()
+        elif len(q_seed) != self._n_joints:
+            raise InvalidCommandError(
+                f"q_seed 需 {self._n_joints} 个, 收到 {len(q_seed)}")
+        q_sol, ok = self._kinematics.ik(pos_d, R_d, list(q_seed))
+        if not ok:
+            raise IKError(f"IK 无解: pose={list(pos_d)}")
+
+        # The solver's `ok` only means "a finite, in-limit configuration came
+        # out"; check the residual so IKError keeps the firmware's meaning.
+        pos_sol, R_sol = self._kinematics.fk(q_sol)
+        pos_err = float(np.linalg.norm(np.asarray(pos_sol) - np.asarray(pos_d)))
+        rot_err = float(np.linalg.norm(
+            _rotation_error(np.asarray(R_sol, float), np.asarray(R_d, float))))
+        if pos_err > _IK_POS_TOL or rot_err > _IK_ROT_TOL:
+            raise IKError(
+                f"IK 未收敛: 残差 {pos_err * 1000:.1f} mm / {rot_err:.4f} rad "
+                f"(容差 {_IK_POS_TOL * 1000:.0f} mm / {_IK_ROT_TOL:.2f} rad)")
+        return [float(v) for v in q_sol]
 
     def plan_movel(
         self, q_start: List[float], pose_goal: Any

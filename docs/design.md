@@ -2,11 +2,11 @@
 
 ## 项目定位
 
-`litearm-pybullet` 是 LiteArm 七轴机械臂的 PyBullet 仿真，API 与 `litearm-core` SDK 逐项对齐（31 个同名方法、同形参、同返回类型），支持三种模式：
+`litearm-pybullet` 是 LiteArm 七轴机械臂的 PyBullet 仿真，API 与 `litearm-python` SDK 逐项对齐（31 个同名方法、同形参、同返回类型），支持三种模式：
 
 | 模式 | 说明 | 需要真机 |
 |------|------|----------|
-| 独立仿真 | `PyBulletArm` 直接替换 `litearm_core.Arm`，无需硬件 | ❌ |
+| 独立仿真 | `PyBulletArm` 直接替换 `litearm.Arm`，无需硬件 | ❌ |
 | 镜像模式 | 仿真跟随真实机械臂状态同步运动 | ✅ |
 | 双控模式 | 同时向真实机械臂和仿真发送指令 | ✅ |
 
@@ -16,7 +16,7 @@
 ┌─────────────────────────────────────────────────┐
 │                  你的 Python 程序                │
 │                                                   │
-│   arm = PyBulletArm()  ← 可替换为 litearm_core.Arm │
+│   arm = PyBulletArm()  ← 可替换为 litearm.Arm │
 │   arm.movej(...)                                  │
 │   arm.get_state()                                 │
 └──────────┬────────────────────┬─────────────────┘
@@ -25,7 +25,7 @@
     │ 独立仿真     │      │ 双控 / 镜像     │
     │             │      │                │
     │ PyBullet    │      │ PyBullet +     │
-    │ 物理引擎    │      │ litearm-core   │
+    │ 物理引擎    │      │ litearm-python   │
     │             │      │ (USB CDC)      │
     │ PID 控制器  │      │                │
     │ FK/IK      │      │ 实臂 + 仿真    │
@@ -61,7 +61,7 @@ litearm-pybullet/
 │       ├── kinematics.py       # PyBullet 内置 FK/IK + plan_*
 │       ├── mirror.py           # DualArm + MirrorMode
 │       ├── trajectory.py       # JointTrajectory / TrajectoryFrame（仿真独有）
-│       ├── _compat.py          # 唯一决策点：装了 litearm_core 就用真的
+│       ├── _compat.py          # 唯一决策点：装了 litearm 就用真的
 │       ├── _fallback.py        # 没装时的结构等价副本（字段/签名对齐 2.1.0）
 │       └── assets/
 │           ├── litearm.urdf
@@ -78,7 +78,7 @@ litearm-pybullet/
 
 ### arm.py — PyBulletArm
 
-主类，31 个方法与 `litearm_core.Arm` 同名同形。核心能力：
+主类，31 个方法与 `litearm.Arm` 同名同形。核心能力：
 
 - **生命周期**：`connect()`（`start()` 是裸转发别名）/ `close()` / `disconnect()` / context manager
 - **状态读取**：`get_state(refresh=)` / `get_status_now()` / `get_tcp()`（都返回 `Msg` 信封）；仿真独有 `fk()` / `ik()`（`ik` 与 SDK 同形）
@@ -107,20 +107,20 @@ litearm-pybullet/
 
 ### mirror.py — 双控 + 镜像
 
-- `DualArm`：同时持有 `litearm_core.Arm` 和 `PyBulletArm`，运动命令同时发两边
+- `DualArm`：同时持有 `litearm.Arm` 和 `PyBulletArm`，运动命令同时发两边
 - `MirrorMode`：后台线程持续拉真机状态 → 同步到仿真
 
 镜像必须按 `rate_hz`（默认 50 Hz）**限频**，并且每次都用 `get_state(refresh=True)`：
-litearm-core 没有后台读线程，`refresh=False` 回的只是本调用方上次读到的那帧，
+litearm-python 没有后台读线程，`refresh=False` 回的只是本调用方上次读到的那帧，
 而 500 Hz 每个物理步都发一次串口请求会打死链路。
 
 ### _compat.py / _fallback.py — 类型来源决策
 
-`_compat.py` 是唯一决策点：能 `import litearm_core` 就 re-export 它的
+`_compat.py` 是唯一决策点：能 `import litearm` 就 re-export 它的
 `Msg` / `RobotState` / `CartPlan` / 异常 / `as_pose` / `rpy_to_mat` / `mat_to_rpy`，
-否则从 `_fallback.py` 取结构等价副本。这样 `except litearm_core.MotionTimeoutError`
+否则从 `_fallback.py` 取结构等价副本。这样 `except litearm.MotionTimeoutError`
 在纯仿真环境里也接得住——"PyBulletArm 可替换真臂"这句话才是真的。
-事实由 `litearm_pybullet.HAS_LITEARM_CORE` 暴露，字段/签名由
+事实由 `litearm_pybullet.HAS_LITEARM` 暴露，字段/签名由
 `tests/test_api_parity.py` 在装了 SDK 的一侧钉住。
 
 ### trajectory.py — 轨迹类型
@@ -132,11 +132,11 @@ litearm-core 没有后台读线程，`refresh=False` 回的只是本调用方上
 
 ```
 基础安装: pybullet>=3.2.5, numpy>=1.21
-mirror extra: litearm-core  (真机通信，USB CDC)
+mirror extra: litearm-python  (真机通信，USB CDC)
 ```
 
-`litearm-core` 还没上 PyPI。`[mirror]` extra 里写的就是这个名字，但它在 PyPI 上
-解析不到，所以文档里要写清"从源码装"：`pip install -e ../litearm-core`。
+`litearm-python` 还没上 PyPI。`[mirror]` extra 里写的就是这个名字，但它在 PyPI 上
+解析不到，所以文档里要写清"从源码装"：`pip install -e ../litearm-python`。
 
 ## 物理引擎参数
 
@@ -150,7 +150,7 @@ mirror extra: litearm-core  (真机通信，USB CDC)
 
 完整对照表见 [README](../README_zh-CN.md#api-对照)。这里只给三层的划分：
 
-**1:1 对齐面（31 个）** —— 与 `litearm_core.Arm` 同名、同形参、同默认值、同返回类型、同异常：
+**1:1 对齐面（31 个）** —— 与 `litearm.Arm` 同名、同形参、同默认值、同返回类型、同异常：
 
 ```
 connect/disconnect/close, enable/disable,

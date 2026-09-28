@@ -1,13 +1,13 @@
 # litearm-pybullet
 
 Official PyBullet-based simulation environment for the **LiteArm 7-DOF robotic arm**.
-Aligned 1:1 with the [`litearm-core`](https://github.com/nexform-tech/litearm-core) SDK —
-swap `litearm_core.Arm(port=...)` with `PyBulletArm(render=True)` and your control code
+Aligned 1:1 with the [`litearm-python`](https://github.com/nexform-tech/litearm-python) SDK —
+swap `litearm.Arm(port=...)` with `PyBulletArm(render=True)` and your control code
 runs the same way in simulation and on hardware.
 
 ## Features
 
-- 🔄 **1:1 API alignment with `litearm-core`** — the same 31 method names, parameters, defaults, `Msg` envelope and `RobotState`/`CartPlan` return types. `PyBulletArm` replaces `Arm` directly.
+- 🔄 **1:1 API alignment with `litearm-python`** — the same 31 method names, parameters, defaults, `Msg` envelope and `RobotState`/`CartPlan` return types. `PyBulletArm` replaces `Arm` directly.
 - 🖥️ **Three operating modes** — Standalone simulation / Mirror tracking / Dual control
 - 🎮 **Native PyBullet rendering** — Real-time visualization of arm motion
 - 🧪 **No hardware required** — Develop and test motion logic without a physical arm
@@ -31,16 +31,16 @@ cd litearm-pybullet
 pip install -e ".[dev]"
 ```
 
-**Mirror/dual mode needs `litearm-core`, which is not on PyPI.** The `[mirror]`
+**Mirror/dual mode needs `litearm-python`, which is not on PyPI.** The `[mirror]`
 extra names it as a dependency, but that name does not resolve against PyPI yet,
 so install it from a source checkout first:
 
 ```bash
-pip install -e ../litearm-core      # sibling checkout
-pip install -e ".[mirror]"          # or just use PYTHONPATH=../litearm-core/src
+pip install -e ../litearm-python      # sibling checkout
+pip install -e ".[mirror]"          # or just use PYTHONPATH=../litearm-python/src
 ```
 
-Standalone simulation needs neither: `litearm_pybullet.HAS_LITEARM_CORE` tells you
+Standalone simulation needs neither: `litearm_pybullet.HAS_LITEARM` tells you
 whether the real SDK was importable, and standalone mode never requires it.
 
 ## Quick Start
@@ -66,10 +66,10 @@ with PyBulletArm(render=True) as arm:            # connect() is implicit
 ### Mode 2 — Mirror Mode (sim follows real arm)
 
 ```python
-from litearm_pybullet import PyBulletArm, litearm_core   # needs litearm-core installed
+from litearm_pybullet import PyBulletArm, litearm   # needs litearm-python installed
 
 # Connect to the real arm over USB CDC — no server, no endpoint
-real = litearm_core.Arm(port=None).connect()             # None = auto-detect
+real = litearm.Arm(port=None).connect()             # None = auto-detect
 
 # Create simulation and start mirroring
 sim = PyBulletArm(render=True).connect()
@@ -97,7 +97,7 @@ dual.close()
 ┌─────────────────────────────────────────────────┐
 │               Your Python Program                │
 │                                                   │
-│   arm = PyBulletArm()  ← can replace litearm_core.Arm │
+│   arm = PyBulletArm()  ← can replace litearm.Arm │
 │   arm.movej(...)                                  │
 │   arm.get_state()                                 │
 └──────────┬────────────────────┬─────────────────┘
@@ -106,7 +106,7 @@ dual.close()
     │ Standalone   │      │ Dual / Mirror   │
     │ Simulation   │      │                 │
     │              │      │ PyBullet +      │
-    │ PyBullet     │      │ litearm-core    │
+    │ PyBullet     │      │ litearm-python    │
     │ physics      │      │ (USB CDC)       │
     │ engine       │      │                 │
     │ PID ctrl     │      │ Real + Sim      │
@@ -139,9 +139,9 @@ return types, same exceptions — verified by `tests/test_api_parity.py` against
 the installed SDK. The second is simulation-only, which the SDK has no
 equivalent for. The third is kept for 0.1-era callers and is on its way out.
 
-### 1:1 with `litearm_core.Arm` (31 names)
+### 1:1 with `litearm.Arm` (31 names)
 
-| `litearm_core.Arm` | `PyBulletArm` | Notes |
+| `litearm.Arm` | `PyBulletArm` | Notes |
 |---|---|---|
 | `Arm(port=...)` | `PyBulletArm(render=True)` | Constructor; the sim takes `render`, and `connect(port=None)` |
 | `connect(port=None)` / `disconnect()` / `close()` | same |  |
@@ -207,14 +207,17 @@ new method, so they cannot drift.
 
 ## Migrating from 0.1 (the `litearm-python` era)
 
-The real-arm backend used to be the Zenoh-based `litearm-python` 0.1.0. It is now
-`litearm-core` (USB CDC straight to the firmware), and the simulation API follows it.
-Porting code is mostly mechanical:
+The distribution name `litearm-python` covers two SDKs that share only the import
+line. 0.1.0 was a Zenoh client: it talked to a separate `litearm-server` process and
+was addressed with `endpoint=`/`arm_id=`. 2.1 is a thin client that speaks the
+firmware's protocol over USB CDC, and its constructor takes `port=`. The real-arm
+backend here uses 2.1 and the simulation API follows it, so porting is mostly
+mechanical:
 
-| 0.1 | now |
+| 0.1 (server-era) | 2.1 (USB CDC) |
 |---|---|
-| `import litearm` | `import litearm_core` |
-| `litearm.Arm(endpoint="tcp/host:7447", arm_id="armA")` | `litearm_core.Arm(port="/dev/ttyACM0")` |
+| `litearm-python` 0.1.0, `import litearm` | `litearm-python` 2.1, the same `import litearm` |
+| `litearm.Arm(endpoint="tcp/host:7447", arm_id="armA")` | `litearm.Arm(port="/dev/ttyACM0")` |
 | `DualArm(real_endpoint=..., real_arm_id=...)` | `DualArm(real_port=...)` |
 | `arm.start()` | `arm.connect()` (still an alias, but deprecated in spirit) |
 | `state = arm.get_state(); state["q"]` | `arm.get_state().value.q` |

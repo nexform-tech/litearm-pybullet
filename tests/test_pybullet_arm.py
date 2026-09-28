@@ -75,14 +75,15 @@ def test_get_status_now(arm):
 
 
 def test_get_tcp(arm):
-    """get_tcp returns Msg[(x,y,z,r,p,y)]; get_tcp_pose rebuilds (pos, R)."""
+    """get_tcp returns Msg[(x,y,z,r,p,y)]; the deprecated alias rebuilds (pos, R)."""
     msg = arm.get_tcp()
     assert isinstance(msg, Msg)
     rpy = msg.value
     assert len(rpy) == 6
     assert all(isinstance(x, float) for x in rpy)
 
-    pos, R = arm.get_tcp_pose()
+    with pytest.deprecated_call():
+        pos, R = arm.get_tcp_pose()
     assert len(pos) == 3
     assert len(R) == 3
     assert len(R[0]) == 3

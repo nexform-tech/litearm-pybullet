@@ -717,6 +717,7 @@ class PyBulletArm:
         callers still want a matrix. The rotation is rebuilt from the same
         rpy the SDK reports, so both spellings agree by construction.
         """
+        _warn_deprecated("get_tcp_pose", "get_tcp")
         rpy = self.get_tcp().value
         return list(rpy[:3]), rpy_to_mat(rpy[3:])
 

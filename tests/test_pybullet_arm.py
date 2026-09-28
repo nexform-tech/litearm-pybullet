@@ -28,6 +28,12 @@ def _pose6(pos, R):
     return list(pos) + mat_to_rpy(R)
 
 
+def _tcp(arm):
+    """The current TCP as ``(pos, R)`` — the matrix form the planners take."""
+    rpy = arm.get_tcp().value
+    return rpy[:3], rpy_to_mat(rpy[3:])
+
+
 @pytest.fixture
 def arm():
     """Create a headless PyBulletArm for testing."""
@@ -181,7 +187,7 @@ def test_move_l(arm):
     time.sleep(0.1)
     arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
 
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     target = [pos[0], pos[1], pos[2] - 0.05]
     plan = arm.move_l([target, R], speed=0.5)
     assert isinstance(plan, CartPlan)
@@ -200,7 +206,7 @@ def test_move_l(arm):
 def test_move_l_no_wait(arm):
     """wait=False reports "did not wait", not "did not arrive"."""
     arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     plan = arm.move_l([pos[0], pos[1], pos[2] - 0.03] + mat_to_rpy(R), wait=False)
     assert plan.ok is True
     assert plan.settled is False
@@ -221,7 +227,7 @@ def test_move_p(arm):
     time.sleep(0.1)
     arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
 
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     # Same attitude, 4 cm down. The sim's local IK leaves a few millimetres of
     # residual, so the arrival tolerance is opened up to cover it — the test is
     # about move_p's arrival criterion, not about the solver's limits.
@@ -235,7 +241,7 @@ def test_move_p(arm):
 
 def test_move_p_reports_an_impossible_tolerance_before_moving(arm):
     """A tolerance the solver cannot meet is an IKError, not a 15 s timeout."""
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     goal = [pos[0], pos[1], pos[2] - 0.02] + mat_to_rpy(R)
     with pytest.raises(IKError, match="可达精度"):
         arm.move_p(goal, pos_tol=1e-4)
@@ -243,7 +249,7 @@ def test_move_p_reports_an_impossible_tolerance_before_moving(arm):
 
 def test_move_p_rejects_pose_sequences(arm):
     """A sequence of poses is move_path's job, and says so."""
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     with pytest.raises(InvalidCommandError, match="move_path"):
         arm.move_p([[pos[0], pos[1], pos[2], 0.0, 0.0, 0.0]] * 2)
 
@@ -268,7 +274,7 @@ def test_move_c_checks_the_declared_start(arm):
 
 def test_move_path_limits_and_corners(arm):
     """move_path rejects an empty path and more waypoints than the firmware takes."""
-    pos, _ = arm.get_tcp_pose()
+    pos = _tcp(arm)[0]
     with pytest.raises(InvalidCommandError, match="路径为空"):
         arm.move_path([])
     with pytest.raises(InvalidCommandError, match="32"):
@@ -280,7 +286,7 @@ def test_deprecated_motion_aliases(arm):
     import time
     time.sleep(0.1)
     arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     rpy = mat_to_rpy(R)
 
     def pose(dz):
@@ -340,7 +346,7 @@ def test_emergency_stop_and_reset(arm):
 def test_emergency_stop_cancels_a_plan_and_returns_none(arm):
     """A stop is not a plan's completion: the plan yields, and says so."""
     arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     plan = arm.move_l([pos[0], pos[1], pos[2] - 0.05] + mat_to_rpy(R),
                       wait=False)
     assert plan.settled is False
@@ -585,7 +591,7 @@ def test_zero_g_period_must_fit_the_watchdog(arm):
 def test_zero_g_refuses_to_enter_mid_cartesian(arm):
     """Entering mid-trajectory would coast the arm to a stop on friction."""
     arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     arm.move_l([pos[0], pos[1], pos[2] - 0.05] + mat_to_rpy(R), wait=False)
 
     with pytest.raises(InvalidCommandError, match="笛卡尔"):
@@ -602,7 +608,7 @@ def test_zero_g_refuses_to_enter_mid_cartesian(arm):
 def test_zero_g_guards_action_commands(arm):
     """Every action command refuses while zero gravity is held; only the
     drain-power directions stay reachable."""
-    pos, R = arm.get_tcp_pose()
+    pos, R = _tcp(arm)
     arm.zero_g_start()
     actions = {
         "movej": lambda: arm.movej([0.0] * 7),

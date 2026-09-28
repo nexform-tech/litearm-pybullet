@@ -2,59 +2,70 @@
 # -*- coding: utf-8 -*-
 """样例 05 · 双控模式 — 同时控制真实机械臂和仿真
 
+同一条指令发给两边：可以先在仿真上确认动作，再让它落到实臂上。
+
 前提:
-  1. 机械臂控制器上 litearm-server 已启动
-  2. 客户端与控制器网络互通
-  3. 客户端已安装 litearm-python (pip install litearm-pybullet[mirror])
+  1. 机械臂已通过 USB 接上（CDC 串口）
+  2. 客户端已装 litearm-core（未上 PyPI，从源码装）:
+       pip install -e ../litearm-core
 
 运行:
-  python3 examples/05_dual_control.py --endpoint tcp/192.168.31.139:7447
+  python3 examples/05_dual_control.py
+  python3 examples/05_dual_control.py --port /dev/ttyACM0
 
 互动模式（演示后保持窗口，可输入关节目标）:
-  python3 examples/05_dual_control.py --endpoint tcp/192.168.31.139:7447 --interactive
+  python3 examples/05_dual_control.py --interactive
 """
 import argparse
 import time
 
 from litearm_pybullet import DualArm
 
+Q_HOME = [0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0]
+
+
+def _show(label, result):
+    """movej 的返回值是 (实臂状态, 仿真状态)，两边都是 RobotState。
+
+    （笛卡尔的 move_l/move_c/move_path 返回的是 (CartPlan, CartPlan)。）
+    """
+    real, sim = result
+    print(f"     {label}: 实臂 mode={real.mode_name} "
+          f"q[1]={real.q[1]:.3f} | 仿真 mode={sim.mode_name} q[1]={sim.q[1]:.3f}")
+
 
 def main():
     ap = argparse.ArgumentParser(description="双控：实臂+仿真同时运动")
-    ap.add_argument("--endpoint", default="tcp/192.168.31.139:7447",
-                    help="litearm-server 的 zenoh 端点")
+    ap.add_argument("--port", default=None,
+                    help="真臂串口 (缺省: 自动查找唯一的 STM32 CDC 设备)")
     ap.add_argument("--interactive", "-i", action="store_true",
                     help="演示后保持仿真窗口，输入关节目标交互控制")
     args = ap.parse_args()
 
-    dual = DualArm(
-        real_endpoint=args.endpoint,
-        render=True,
-        mirror_first=True,
-    )
+    dual = DualArm(real_port=args.port, render=True, mirror_first=True)
     dual.start()
 
     try:
+        # 使能是**显式**的：构造函数不会给实体机械臂上电。
+        # 这一行就是"从这里开始，实臂会动"的那一行，看得见才好 review
+        print("[双控] 使能实臂 + 仿真 ...")
+        dual.enable()
+
         time.sleep(1.0)
-
-        real_state = dual.get_real_state()
-        if real_state is None:
-            print("[实臂] 未收到状态，检查 server 是否在运行")
+        state = dual.get_real_state().value
+        if state is None:
+            print("[实臂] 未收到状态，检查串口/固件")
             return
-
-        print(f"[实臂] 当前关节角: {[round(x, 3) for x in real_state['q']]}")
+        print(f"[实臂] 当前关节角: {[round(x, 3) for x in state.q]}")
 
         # ── 双控运动 ──
         print("\n[1] 双控 movej → 舒展构型 (speed=0.2)")
-        Q_HOME = [0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0]
-        real_ok, sim_ok = dual.movej(Q_HOME, speed=0.2)
-        print(f"     实臂: {'OK' if real_ok else 'FAIL'}, 仿真: {'OK' if sim_ok else 'FAIL'}")
+        _show("结果", dual.movej(Q_HOME, speed=0.2))
 
         time.sleep(0.5)
 
         print("\n[2] 双控 movej → 回零位 (speed=0.2)")
-        real_ok, sim_ok = dual.movej([0.0] * 7, speed=0.2)
-        print(f"     实臂: {'OK' if real_ok else 'FAIL'}, 仿真: {'OK' if sim_ok else 'FAIL'}")
+        _show("结果", dual.movej([0.0] * 7, speed=0.2))
 
         print("\n双控运动完成")
 
@@ -90,8 +101,7 @@ def main():
                         print("  无法解析，请用空格分隔的数字")
                         continue
                 print(f"  movej -> {[round(x, 2) for x in q]}  speed=0.15 ...")
-                r_ok, s_ok = dual.movej(q, speed=0.15, settle_s=0.8)
-                print(f"  实臂: {'OK' if r_ok else 'FAIL'}, 仿真: {'OK' if s_ok else 'FAIL'}")
+                _show("结果", dual.movej(q, speed=0.15))
         else:
             print("\n仿真窗口保持打开，按 Enter 退出 ...")
             try:
@@ -103,7 +113,8 @@ def main():
         print("\n用户中断")
     finally:
         try:
-            dual.request_stop()
+            # 双控里两边都要收力；实臂优先，仿真那边只是本进程的状态
+            dual.emergency_stop()
         except Exception:
             pass
         dual.close()

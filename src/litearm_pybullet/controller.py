@@ -64,6 +64,17 @@ class JointPIDController:
         else:
             self._dq_des = np.zeros(self.n_joints)
 
+    @property
+    def desired_q(self) -> np.ndarray:
+        """Current target positions — read it to build a partial update.
+
+        ``set_target`` replaces the whole vector, but some commands address one
+        joint at a time (a per-joint servo frame), and those need the rest of
+        the target kept as it was. A copy, so the caller cannot write through to
+        the controller's state.
+        """
+        return self._q_des.copy()
+
     def reset(self) -> None:
         """Reset integral term and targets."""
         self._integral = np.zeros(self.n_joints)

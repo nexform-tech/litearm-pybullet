@@ -23,6 +23,11 @@ def _assert_mat_close(R, expected, abs_=1e-6):
         assert row == pytest.approx(exp_row, abs=abs_)
 
 
+def _pose6(pos, R):
+    """The SDK's ``[x, y, z, roll, pitch, yaw]`` spelling of a pose."""
+    return list(pos) + mat_to_rpy(R)
+
+
 @pytest.fixture
 def arm():
     """Create a headless PyBulletArm for testing."""
@@ -319,20 +324,91 @@ def test_plan_movel(arm):
     assert len(path[0]) == 7
 
 
-def test_request_stop(arm):
-    """Stop shows up as mode=EMERGENCY, and clearing it restores idle."""
-    import time
-    arm.request_stop()
-    time.sleep(0.05)
-    state = arm.get_state().value
-    assert state.mode_name == "EMERGENCY"
-    assert state.faulted is True
+def test_emergency_stop_and_reset(arm):
+    """Stop shows up as mode=EMERGENCY, and reset restores idle."""
+    arm.emergency_stop()
+    assert arm.get_status_now().value.mode_name == "EMERGENCY"
+    assert arm.get_status_now().value.faulted is True
 
-    arm.clear_stop()
-    time.sleep(0.05)
-    state = arm.get_state().value
+    arm.reset()
+    state = arm.get_status_now().value
     assert state.mode_name == "INIT"
     assert state.faulted is False
+
+
+def test_emergency_stop_cancels_a_plan_and_returns_none(arm):
+    """A stop is not a plan's completion: the plan yields, and says so."""
+    arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
+    pos, R = arm.get_tcp_pose()
+    plan = arm.move_l([pos[0], pos[1], pos[2] - 0.05] + mat_to_rpy(R),
+                      wait=False)
+    assert plan.settled is False
+
+    assert arm.emergency_stop() is None
+    assert arm.get_status_now().value.mode_name == "EMERGENCY"
+    # The background play yielded its slot rather than running to the end.
+    arm._motion_serial.acquire()
+    assert arm.get_status_now().value.cart_busy is False
+
+
+def test_stop_aliases_are_deprecated_forwards(arm):
+    """The 0.1 spellings still work, and warn."""
+    with pytest.deprecated_call():
+        arm.request_stop()
+    assert arm.get_status_now().value.mode_name == "EMERGENCY"
+
+    with pytest.deprecated_call():
+        arm.clear_stop()
+    assert arm.get_status_now().value.mode_name == "INIT"
+
+
+def test_clear_faults_returns_none(arm):
+    """clear_faults returns None (litearm-core's signature), not a list."""
+    assert arm.clear_faults() is None
+    arm.emergency_stop()
+    arm.clear_faults()
+    assert arm.get_status_now().value.mode_name == "INIT"
+    assert arm.get_status_now().value.faulted is False
+
+
+def test_park_and_set_motion_mode(arm):
+    """Only park (mode 0) exists, and anything else says so."""
+    assert arm.park() is None
+    assert arm.set_motion_mode(0) is None
+    with pytest.raises(InvalidCommandError, match="只识别 0"):
+        arm.set_motion_mode(1)
+    with pytest.raises(InvalidCommandError, match="0..255"):
+        arm.set_motion_mode(256)
+
+
+def test_set_speed_governs_every_motion(arm):
+    """set_speed is a global percentage, and it scales the rate motions run at."""
+    assert arm._governed(1.0) == pytest.approx(1.0)
+    arm.set_speed(50)
+    assert arm._governed(1.0) == pytest.approx(0.5)
+    # The cartesian playback interval doubles, so the path takes twice as long.
+    assert arm._rate_interval(0.02, arm._governed(1.0)) == pytest.approx(0.04)
+
+    # The two knobs multiply: a 0.5 call under a 50% governor runs at 25%.
+    assert arm._governed(0.5) == pytest.approx(0.25)
+
+    # A reset puts it back — a script that crept should not stay creeping.
+    arm.reset()
+    assert arm._governed(1.0) == pytest.approx(1.0)
+
+
+def test_set_speed_takes_only_an_integer_percentage(arm):
+    """1 means 1%, so a 0..1 multiplier must not be silently accepted."""
+    with pytest.raises(InvalidCommandError, match="整数百分比"):
+        arm.set_speed(0.5)
+    with pytest.raises(InvalidCommandError, match="整数百分比"):
+        arm.set_speed(True)     # bool is an int subclass; it still reads as "on"
+    with pytest.raises(InvalidCommandError, match="0..100"):
+        arm.set_speed(101)
+    with pytest.raises(InvalidCommandError, match="0..100"):
+        arm.set_speed(-1)
+    arm.set_speed(0)
+    arm.set_speed(100)
 
 
 def test_enable_disable(arm):
@@ -347,6 +423,213 @@ def test_enable_disable(arm):
     assert arm.get_state().value.enabled is True
 
 
+def test_enable_attempts_is_accepted(arm):
+    """`attempts` is litearm-core's retry count; the simulation never needs one."""
+    assert arm.enable(attempts=3) is None
+    assert arm.get_status_now().value.enabled is True
+
+
+def test_connect_is_idempotent_and_remembers_the_port(arm):
+    """connect() returns self, keeps one loop running, and records the port."""
+    assert arm.connect() is arm
+    thread = arm._sim_thread
+    assert arm.connect() is arm
+    assert arm._sim_thread is thread        # no second simulation loop
+    assert arm.port is None                 # nobody named one
+
+    assert arm.connect("/dev/ttyACM0") is arm
+    assert arm.port == "/dev/ttyACM0"
+    assert arm._sim_thread is thread
+
+
+def test_start_is_a_forward_to_connect(arm):
+    """The simulation's historical name still works, and is the same operation."""
+    assert arm.start() is None
+    assert arm._sim_running is True
+    assert arm.get_status_now().value.n == 7
+
+
+def test_disconnect_is_close(arm):
+    """disconnect() is the litearm-core name for the same teardown."""
+    assert arm.disconnect() is None
+    assert arm._sim_running is False
+    arm.disconnect()                        # idempotent
+
+
+def test_context_manager_connects_and_closes():
+    """`with` enters connected and leaves closed, as on the real arm."""
+    a = PyBulletArm(render=False)
+    with a as entered:
+        assert entered is a
+        assert a._sim_running is True
+        assert a.get_state().value.n == 7
+    assert a._sim_running is False
+
+
+def test_move_js_servos_to_a_point(arm):
+    """One servo frame is not a trajectory: it drives, it does not wait."""
+    import time
+    target = [0.0, 0.5, 0.0, -1.0, 0.0, 0.6, 0.0]
+    assert arm.move_js(target, [0.0] * 7) is None
+    assert arm.get_status_now().value.mode_name == "MOVE_JS"
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        err = np.max(np.abs(np.array(arm.get_status_now().value.q)
+                            - np.array(target)))
+        if err < arm._q_tol:
+            break
+        time.sleep(0.02)
+    assert err < arm._q_tol, f"move_js never got there: err={err}"
+
+
+def test_move_js_validates_arity(arm):
+    with pytest.raises(InvalidCommandError, match="q 需 N 个"):
+        arm.move_js([0.0] * 6)
+    with pytest.raises(InvalidCommandError, match="dq 需 N 个"):
+        arm.move_js([0.0] * 7, [0.0] * 6)
+    with pytest.raises(InvalidCommandError, match="tau_ff 需 N 个"):
+        arm.move_js([0.0] * 7, [0.0] * 7, [0.0] * 6)
+
+
+def test_send_mit_writes_one_joint(arm):
+    """The three MIT numbers land where the firmware would put them."""
+    assert arm.send_mit(2, 0.4, 0.0, 120.0, 8.0, 0.5) is None
+    assert arm.get_status_now().value.mode_name == "MOVE_MIT"
+    assert arm._controller.kp[2] == pytest.approx(120.0)
+    assert arm._controller.kd[2] == pytest.approx(8.0)
+    assert arm._controller.desired_q[2] == pytest.approx(0.4)
+    assert arm._mit_tau[2] == pytest.approx(0.5)
+    # ... and only that joint: the rest of the target is left as it was.
+    assert arm._controller.desired_q[0] == pytest.approx(0.0)
+
+    with pytest.raises(InvalidCommandError, match="idx 越界"):
+        arm.send_mit(7, 0.0, 0.0, 1.0, 1.0, 0.0)
+    with pytest.raises(InvalidCommandError, match="idx 越界"):
+        arm.send_mit(-1, 0.0, 0.0, 1.0, 1.0, 0.0)
+
+
+def test_send_mit_all_writes_every_joint(arm):
+    q = [0.1] * 7
+    assert arm.send_mit_all(q, [0.0] * 7, [100.0] * 7, [5.0] * 7, [0.0] * 7) is None
+    assert arm.get_status_now().value.mode_name == "MIT_ALL"
+    assert arm._controller.kp.tolist() == pytest.approx([100.0] * 7)
+    assert arm._controller.desired_q.tolist() == pytest.approx(q)
+
+    for bad in ("q", "dq", "kp", "kd", "tau"):
+        args = {n: [0.0] * 7 for n in ("q", "dq", "kp", "kd", "tau")}
+        args[bad] = [0.0] * 6
+        with pytest.raises(InvalidCommandError, match=f"{bad} 需 N 个"):
+            arm.send_mit_all(args["q"], args["dq"], args["kp"],
+                             args["kd"], args["tau"])
+
+
+def test_zero_g_enters_and_leaves(arm):
+    """zero_g is a mode you can see, and a handle you can use as a block."""
+    assert arm.zero_g_active is False
+    assert arm.zero_g_error is None
+
+    assert arm.zero_g_start() is None
+    assert arm.zero_g_active is True
+    assert arm.get_status_now().value.mode_name == "ZERO_G"
+
+    assert arm.zero_g_stop() is None
+    assert arm.zero_g_active is False
+    assert arm.get_status_now().value.mode_name == "INIT"
+
+    with arm.zero_g() as entered:
+        assert entered is arm
+        assert arm.zero_g_active is True
+    assert arm.zero_g_active is False
+
+    # Idempotent on both ends.
+    arm.zero_g_stop()
+    arm.zero_g_start()
+    arm.zero_g_start()
+    assert arm.zero_g_active is True
+
+
+def test_zero_g_holds_the_arm_against_gravity(arm):
+    """That is the whole point of the mode: gravity is cancelled, nothing else."""
+    arm.zero_g_start()
+    q0 = np.array(arm.get_status_now().value.q)
+    import time
+    time.sleep(0.4)
+    q1 = np.array(arm.get_status_now().value.q)
+    assert np.max(np.abs(q1 - q0)) < 0.05, "the arm sagged in zero gravity"
+
+
+def test_zero_g_period_must_fit_the_watchdog(arm):
+    """The period exists to beat a 0.10 s watchdog; outside that window it cannot."""
+    with pytest.raises(InvalidCommandError, match="保活周期"):
+        arm.zero_g_start(period=0.0)
+    with pytest.raises(InvalidCommandError, match="保活周期"):
+        arm.zero_g_start(period=0.10)
+    with pytest.raises(InvalidCommandError, match="保活周期"):
+        arm.zero_g_start(period=1.0)
+    arm.zero_g_start(period=0.04)
+    arm.zero_g_stop()
+
+
+def test_zero_g_refuses_to_enter_mid_cartesian(arm):
+    """Entering mid-trajectory would coast the arm to a stop on friction."""
+    arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
+    pos, R = arm.get_tcp_pose()
+    arm.move_l([pos[0], pos[1], pos[2] - 0.05] + mat_to_rpy(R), wait=False)
+
+    with pytest.raises(InvalidCommandError, match="笛卡尔"):
+        arm.zero_g_start()
+    assert arm.zero_g_active is False
+
+    arm._motion_serial.acquire()
+    arm._motion_serial.release()
+    arm.zero_g_start()                      # free to enter once it has finished
+    assert arm.zero_g_active is True
+    arm.zero_g_stop()
+
+
+def test_zero_g_guards_action_commands(arm):
+    """Every action command refuses while zero gravity is held; only the
+    drain-power directions stay reachable."""
+    pos, R = arm.get_tcp_pose()
+    arm.zero_g_start()
+    actions = {
+        "movej": lambda: arm.movej([0.0] * 7),
+        "movej_sync": lambda: arm.movej_sync([0.0] * 7),
+        "move_p": lambda: arm.move_p([pos[0], pos[1], pos[2], 0.0, 0.0, 0.0]),
+        "move_l": lambda: arm.move_l([pos[0], pos[1], pos[2], 0.0, 0.0, 0.0]),
+        "move_c": lambda: arm.move_c(_pose6(pos, R), _pose6(pos, R), _pose6(pos, R)),
+        "move_path": lambda: arm.move_path([_pose6(pos, R)]),
+        "home": lambda: arm.home(),
+        "move_js": lambda: arm.move_js([0.0] * 7),
+        "send_mit": lambda: arm.send_mit(0, 0.0, 0.0, 1.0, 1.0, 0.0),
+        "send_mit_all": lambda: arm.send_mit_all(
+            [0.0] * 7, [0.0] * 7, [1.0] * 7, [1.0] * 7, [0.0] * 7),
+        "set_speed": lambda: arm.set_speed(50),
+        "park": lambda: arm.park(),
+        "reset": lambda: arm.reset(),
+        "clear_faults": lambda: arm.clear_faults(),
+        "enable": lambda: arm.enable(),
+    }
+    for name, call in actions.items():
+        with pytest.raises(InvalidCommandError, match="零重力保活正在进行"):
+            call()
+
+    # Reading is always allowed, and so is cutting power.
+    assert arm.get_status_now().value.n == 7
+    assert arm.emergency_stop() is None
+    assert arm.zero_g_active is False        # a stop ends zero gravity
+    arm.zero_g_start()
+    assert arm.disable() is None
+    assert arm.zero_g_active is False
+
+
+def test_zero_gravity_alias_is_deprecated(arm):
+    with pytest.deprecated_call():
+        arm.zero_gravity()
+    assert arm.zero_g_active is True
+    arm.zero_g_stop()
+
+
 def test_set_get_gains(arm):
     """Test set_gains and get_gains."""
     gains = arm.set_gains(kp=[300]*7, kd=[10]*7)
@@ -355,15 +638,6 @@ def test_set_get_gains(arm):
 
     gains = arm.get_gains()
     assert gains["kp"] == [300]*7
-
-
-def test_context_manager():
-    """Test context manager."""
-    with PyBulletArm(render=False) as a:
-        import time
-        time.sleep(0.1)
-        assert a.get_state().value.n == 7
-    # Should be closed now
 
 
 def test_device(arm):

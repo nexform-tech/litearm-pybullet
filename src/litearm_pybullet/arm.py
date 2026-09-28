@@ -79,6 +79,9 @@ _MIN_MASS = 0.5
 _MODE_INIT = 0
 _MODE_MOVE_J = 1
 _MODE_MOVE_P = 2
+_MODE_MOVE_JS = 3
+_MODE_MOVE_MIT = 4
+_MODE_MIT_ALL = 5
 _MODE_EMERGENCY = 6
 _MODE_ZERO_G = 7
 
@@ -147,6 +150,24 @@ _SPEED_FLOOR = 1e-3
 #: after a fault). The simulation moves at the same rate so a script that times
 #: the two gets comparable numbers.
 _HOME_SPEED = 0.10
+
+#: Default zero-gravity keepalive period. litearm-core calls this
+#: ``ZG_KEEPALIVE_S`` and re-sends `ZERO_G` every 0.04 s to stay ahead of the
+#: firmware's 0.10 s watchdog. The simulation has no watchdog to feed, so the
+#: period is validated against the same window and otherwise unused — see
+#: :meth:`PyBulletArm.zero_g_start`.
+_ZG_KEEPALIVE_S = 0.04
+#: The keepalive period window, bounded by the firmware watchdog timeout.
+_ZG_PERIOD_MIN = 0.005
+_ZG_PERIOD_MAX = 0.10
+
+#: Refusal text for action commands sent while zero gravity is held — copied
+#: verbatim from litearm_core's ``ZERO_G_GUARD_MESSAGE``. Callers match on the
+#: wording (the SDK's own cartesian guard compares against the same constant),
+#: so a paraphrase here would read as a different refusal.
+_ZERO_G_GUARD_MESSAGE = (
+    "零重力保活正在进行, 拒绝其它下行命令 (会改写模式/看门狗, 与保活互相打架); "
+    "先 arm.zero_g_stop() 退出")
 
 
 def _orient_angle(rpy_a: Sequence[float], rpy_b: Sequence[float]) -> float:
@@ -383,6 +404,7 @@ class PyBulletArm:
         # State
         self._lock = threading.Lock()
         self._sim_running = False
+        self._closed = False
         self._sim_thread: Optional[threading.Thread] = None
         self._stopped = False
         self._enabled = True
@@ -393,6 +415,27 @@ class PyBulletArm:
         self._cart_busy = False
         self._seq = 0
         self._last_tau = np.zeros(n_joints)
+
+        # Global speed governor: `set_speed(percent)` scales every motion, the
+        # way the firmware's `gov_ratio = percent/100` does. 1.0 = full speed,
+        # restored by `reset()`. It is a *separate* knob from the per-call
+        # `speed` fraction, and the two multiply.
+        self._gov_ratio = 1.0
+
+        # MIT servo feed-forward, written by send_mit/send_mit_all. The
+        # simulation has no per-joint impedance loop, so these are applied the
+        # way the firmware's MIT frame is: as a torque added to the controller's.
+        self._mit_tau = np.zeros(n_joints)
+
+        # Zero-gravity (free-drag) mode: the position loop is dropped and only
+        # gravity is compensated, which is what the firmware's `0x06` does.
+        self._zero_g = False
+        self._zero_g_error: Optional[BaseException] = None
+
+        # The port the caller said the real arm would be on. The simulation has
+        # no serial link, so this is recorded for introspection only — a script
+        # written against the real arm keeps its `connect(port=...)` call.
+        self._port: Optional[str] = None
 
         # One cartesian motion at a time: concurrent cartesian calls queue here,
         # the way litearm-core serializes them on `_cart_serial`.  `_motion_gen`
@@ -423,18 +466,43 @@ class PyBulletArm:
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
-    def start(self) -> None:
-        """Start the background simulation thread."""
+    def connect(self, port: Optional[str] = None) -> "PyBulletArm":
+        """Start the simulation and return ``self`` (idempotent).
+
+        ``port`` exists for call-site parity with ``litearm_core.Arm``: a script
+        written for the real arm passes the serial device here, and running that
+        same script against the simulation must not need editing. There is no
+        serial link to open, so the value is recorded (``self.port``) and
+        otherwise unused — the simulation is always "connected" once its loop is
+        running. Calling it again is a no-op, as on the real arm.
+        """
+        if port is not None:
+            self._port = port
         if self._sim_running:
-            return
+            return self
         self._sim_running = True
         self._sim_thread = threading.Thread(
             target=self._sim_loop, daemon=True, name="pybullet_sim"
         )
         self._sim_thread.start()
+        return self
+
+    def start(self) -> None:
+        """Legacy alias for :meth:`connect` — the simulation's historical name."""
+        self.connect()
 
     def close(self) -> None:
-        """Stop simulation and close viewer."""
+        """Stop simulation and close viewer (idempotent).
+
+        Idempotent in the strong sense: the second call does nothing at all.
+        The physics client is gone after the first, so any work here — even
+        something as innocent as re-anchoring a target — would fail on a dead
+        client. ``disconnect()`` and ``__exit__`` both land here, and callers
+        routinely reach for a second one by accident.
+        """
+        if self._closed:
+            return
+        self.zero_g_stop()
         self._sim_running = False
         self._mirroring = False
 
@@ -446,10 +514,27 @@ class PyBulletArm:
             p.disconnect(self._cid)
         except Exception:
             pass
+        self._closed = True
+
+    def disconnect(self) -> None:
+        """Alias for :meth:`close`, the name litearm_core pairs with ``connect``.
+
+        One operation, two names, one implementation: the real SDK delegates
+        ``disconnect()`` to ``close()`` for exactly this reason.
+        """
+        self.close()
+
+    @property
+    def port(self) -> Optional[str]:
+        """The port named to :meth:`connect`, or ``None``.
+
+        ``None`` means "nobody named one" — the simulation needs no port, so
+        there is nothing to search for and nothing to report as found.
+        """
+        return self._port
 
     def __enter__(self) -> "PyBulletArm":
-        self.start()
-        return self
+        return self.connect()
 
     def __exit__(self, *args: Any) -> None:
         self.close()
@@ -483,14 +568,23 @@ class PyBulletArm:
                     q_actual[i] = st[0]
                     dq_actual[i] = st[1]
 
-                if self._enabled and not self._stopped:
+                if self._zero_g:
+                    # Free drag: no position loop, gravity cancelled, plus any
+                    # torque a caller asked for through move_js/send_mit.
+                    ff_torque = np.asarray(p.calculateInverseDynamics(
+                        self._body, list(q_actual), list(dq_actual),
+                        [0.0] * self._n_joints, physicsClientId=self._cid,
+                    ), dtype=float)[:self._n_joints]
+                    tau = ff_torque + self._mit_tau
+                elif self._enabled and not self._stopped:
                     # Gravity + Coriolis feed-forward (computed-torque style)
                     ff_torque = np.asarray(p.calculateInverseDynamics(
                         self._body, list(q_actual), list(dq_actual),
                         [0.0] * self._n_joints, physicsClientId=self._cid,
                     ), dtype=float)[:self._n_joints]
                     tau = self._controller.compute(
-                        q_actual, dq_actual, self._dt, ff_torque=ff_torque
+                        q_actual, dq_actual, self._dt,
+                        ff_torque=ff_torque + self._mit_tau,
                     )
                 else:
                     tau = np.zeros(self._n_joints)
@@ -589,10 +683,15 @@ class PyBulletArm:
         """Current firmware-style mode id.
 
         EMERGENCY dominates: the stop latch overrides whatever mode the arm was
-        in, the same precedence the firmware gives it.
+        in, the same precedence the firmware gives it. Zero gravity comes next,
+        for the same reason: a joint move cannot be in progress while the
+        position loop is dropped, and reporting MOVE_J then would be a mode the
+        arm is not in.
         """
         if self._stopped:
             return _MODE_EMERGENCY
+        if self._zero_g:
+            return _MODE_ZERO_G
         return self._mode
 
     def _msg(self, value: Any, stats: _FrameStats) -> Msg:
@@ -750,6 +849,7 @@ class PyBulletArm:
         instead of after ``move_timeout`` — "this solver cannot stand there" is
         a different fact from "the arm did not get there".
         """
+        self._reject_in_zero_g()
         self._check_speed(speed, "move_p")
         if not _is_single_pose(pose):
             raise InvalidCommandError(
@@ -763,7 +863,7 @@ class PyBulletArm:
         with self._lock:
             q0 = _read_joint_state(self._body, self._joints, self._cid)[0]
         path = self._traj_gen.linear_trajectory(
-            q0, np.asarray(q_goal, dtype=float), speed=max(speed, _SPEED_FLOOR))
+            q0, np.asarray(q_goal, dtype=float), speed=self._governed(speed))
 
         self._mode = _MODE_MOVE_P
         try:
@@ -850,6 +950,7 @@ class PyBulletArm:
                     sync: bool = False,
                     timeout: Optional[float] = None) -> RobotState:
         """Generate a joint trajectory, play it, and wait for arrival."""
+        self._reject_in_zero_g()
         sp = self._check_speed(speed, label)
         q_target = [float(v) for v in q]
         if len(q_target) != self._n_joints:
@@ -859,7 +960,7 @@ class PyBulletArm:
         self._ensure_running()
         with self._lock:
             q0 = _read_joint_state(self._body, self._joints, self._cid)[0]
-        gen_speed = max(sp, _SPEED_FLOOR)
+        gen_speed = self._governed(sp)
         q_target_arr = np.asarray(q_target, dtype=float)
         if sync:
             # Same overall duration as the per-axis profile, but one scalar
@@ -880,6 +981,7 @@ class PyBulletArm:
     def _cartesian_start(self, label: str, poses: List[List[float]],
                          speed: float, wait: bool) -> CartPlan:
         """Plan, then play (and optionally wait on) a cartesian path."""
+        self._reject_in_zero_g()
         sp = self._check_speed(speed, label)
         self._ensure_running()
 
@@ -904,7 +1006,7 @@ class PyBulletArm:
         if not path:
             raise CartesianPlanError(f"{label}: 规划为空")
 
-        interval = self._rate_interval(_CART_WAYPOINT_INTERVAL, sp)
+        interval = self._rate_interval(_CART_WAYPOINT_INTERVAL, self._governed(sp))
         plan = CartPlan(ok=True, err=0, n_wp=len(path), plan_us=plan_us)
 
         # Serialize cartesian motions (concurrent calls queue, as the SDK
@@ -973,6 +1075,16 @@ class PyBulletArm:
     def _rate_interval(base_interval: float, speed: float) -> float:
         """Per-waypoint interval for a geometrically spaced path at ``speed``."""
         return base_interval / max(speed, _SPEED_FLOOR)
+
+    def _governed(self, speed: float) -> float:
+        """Apply the global governor (:meth:`set_speed`) to a per-call speed.
+
+        The two knobs multiply, on the real arm as well: the per-call ``speed``
+        scales one trajectory and ``gov_ratio`` scales everything the firmware
+        runs. Floored so ``set_speed(0)`` yields a motion that never arrives
+        (``MotionTimeoutError``) instead of a division by zero.
+        """
+        return max(speed * self._gov_ratio, _SPEED_FLOOR)
 
     @staticmethod
     def _check_speed(speed: Any, label: str) -> float:
@@ -1115,6 +1227,189 @@ class PyBulletArm:
         _warn_deprecated("movep", "move_path")
         return self.move_path(poses_goal, speed=speed, **kwargs)
 
+    # ── Continuous servo / pass-through ────────────────────────────────────────
+
+    def move_js(self, q: Sequence[float], dq: Optional[Sequence[float]] = None,
+                tau_ff: Optional[Sequence[float]] = None) -> None:
+        """One frame of joint servo: drive to ``q`` at ``dq`` with feed-forward.
+
+        A single frame, exactly as on the real arm — there is no trajectory and
+        no arrival check, and no waiting. A servo loop re-sends this at >=10 Hz;
+        on the real arm the firmware's 0.1 s watchdog drops the frame and
+        fail-softs back to holding if the caller goes quiet. The simulation has
+        no watchdog, so the last commanded point is held indefinitely, which is
+        the same place the arm ends up either way.
+        """
+        self._reject_in_zero_g()
+        self._ensure_running()
+        if len(q) != self._n_joints:
+            raise InvalidCommandError("move_js q 需 N 个")
+        dq_list = [0.0] * self._n_joints if dq is None else list(dq)
+        if len(dq_list) != self._n_joints:
+            raise InvalidCommandError("move_js dq 需 N 个")
+        tau_list = [0.0] * self._n_joints if tau_ff is None else list(tau_ff)
+        if len(tau_list) != self._n_joints:
+            raise InvalidCommandError("move_js tau_ff 需 N 个")
+
+        self._mit_tau = np.asarray(tau_list, dtype=float)
+        self._mode = _MODE_MOVE_JS
+        with self._lock:
+            self._controller.set_target(np.asarray(q, dtype=float),
+                                        np.asarray(dq_list, dtype=float))
+
+    def send_mit(self, idx: int, q: float, dq: float,
+                 kp: float, kd: float, tau: float) -> None:
+        """One MIT impedance frame for a single joint.
+
+        ``kp``/``kd`` are the stiffness and damping the firmware uses for that
+        joint and ``tau`` the feed-forward torque. The simulation has no
+        per-joint impedance loop, so stiffness and damping go to the joint's
+        controller gains and ``tau`` is added to the torque the loop applies —
+        the same three numbers, in the same places.
+        """
+        self._reject_in_zero_g()
+        self._ensure_running()
+        if not 0 <= int(idx) < self._n_joints:
+            raise InvalidCommandError("idx 越界")
+        i = int(idx)
+        self._mode = _MODE_MOVE_MIT
+        with self._lock:
+            self._controller.kp[i] = float(kp)
+            self._controller.kd[i] = float(kd)
+            target = self._controller.desired_q
+            target[i] = float(q)
+            self._mit_tau[i] = float(tau)
+            self._controller.set_target(target)
+
+    def send_mit_all(self, q: Sequence[float], dq: Sequence[float],
+                     kp: Sequence[float], kd: Sequence[float],
+                     tau: Sequence[float]) -> None:
+        """One MIT impedance frame for every joint (see :meth:`send_mit`)."""
+        self._reject_in_zero_g()
+        self._ensure_running()
+        for arr, label in ((q, "q"), (dq, "dq"), (kp, "kp"), (kd, "kd"), (tau, "tau")):
+            if len(arr) != self._n_joints:
+                raise InvalidCommandError(f"send_mit_all {label} 需 N 个")
+        self._mode = _MODE_MIT_ALL
+        with self._lock:
+            self._controller.kp = np.asarray(kp, dtype=float).copy()
+            self._controller.kd = np.asarray(kd, dtype=float).copy()
+            self._mit_tau = np.asarray(tau, dtype=float)
+            self._controller.set_target(np.asarray(q, dtype=float))
+
+    # ── Zero gravity (free drag) ───────────────────────────────────────────────
+
+    def zero_g(self, period: float = _ZG_KEEPALIVE_S) -> "_ZeroGSession":
+        """Enter zero-gravity drag mode and return a context-manager handle.
+
+        Both spellings work, as on the real arm::
+
+            with arm.zero_g():      # exits the mode on block exit
+                ...
+            arm.zero_g(); ...; arm.zero_g_stop()
+        """
+        self.zero_g_start(period=period)
+        return _ZeroGSession(self)
+
+    def zero_g_start(self, period: float = _ZG_KEEPALIVE_S) -> None:
+        """Enter zero gravity (idempotent).
+
+        The position loop is dropped and only gravity is compensated, which is
+        what the firmware's ``0x06`` does. ``period`` is validated against the
+        same window as litearm-core and otherwise unused: the real SDK re-sends
+        the command every ``period`` seconds to stay ahead of the firmware's
+        0.10 s watchdog, and the simulation has no watchdog to stay ahead of.
+
+        Cartesian motion in flight is refused rather than coasted through —
+        entering mid-trajectory drops the position loop on the real arm too, and
+        the arm slides to a stop on friction instead of being taken over.
+        """
+        if not _ZG_PERIOD_MIN <= period < _ZG_PERIOD_MAX:
+            raise InvalidCommandError(
+                f"保活周期需 ∈[{_ZG_PERIOD_MIN:.3f}, {_ZG_PERIOD_MAX:.2f}) —— "
+                f"固件看门狗超时是 0.10s (给的是 {period})")
+        if self._zero_g:
+            return
+        self._reject_if_cart_in_flight()
+        self._zero_g = True
+        self._zero_g_error = None
+        self._mode = _MODE_ZERO_G
+
+    def zero_g_stop(self, raise_on_lost: bool = False) -> None:
+        """Leave zero gravity (idempotent).
+
+        ``raise_on_lost`` reports a keepalive that died on its own; the
+        simulation has no keepalive, so it has nothing to raise and is accepted
+        for signature parity.
+        """
+        self._zero_g = False
+        if self._mode == _MODE_ZERO_G:
+            self._mode = _MODE_INIT
+        with self._lock:
+            q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
+            self._controller.set_target(q_current)
+
+    @property
+    def zero_g_active(self) -> bool:
+        """Whether zero gravity is currently held."""
+        return self._zero_g
+
+    @property
+    def zero_g_error(self) -> Optional[BaseException]:
+        """Why zero gravity was lost, or ``None``."""
+        return self._zero_g_error
+
+    def zero_gravity(self, **kwargs: Any) -> "_ZeroGSession":
+        """Deprecated: use :meth:`zero_g`."""
+        _warn_deprecated("zero_gravity", "zero_g")
+        return self.zero_g()
+
+    def _reject_in_zero_g(self) -> None:
+        """Refuse an action command while zero gravity is held.
+
+        litearm_core puts this on the single write path every action command
+        goes through, because writing any of them rewrites the mode and kicks
+        the watchdog the keepalive is fighting over. The simulation has no
+        keepalive thread, but it keeps the refusal: scripts that lean on it
+        (and on the message) behave the same in both places, and it stops a
+        motion from being commanded into a dropped position loop where it could
+        only ever time out.
+
+        Drain-power directions — ``emergency_stop()``, ``disable()``,
+        ``zero_g_stop()`` — deliberately do not call this: cutting power must
+        stay reachable from every state.
+
+        Checked before the individual argument validations rather than after
+        them, which is a step earlier than litearm_core's write-path guard. Both
+        orders raise ``InvalidCommandError``; only the message differs on a call
+        that is wrong twice over, and here the state of the arm is the more
+        fundamental thing to be told about.
+        """
+        if self._zero_g:
+            raise InvalidCommandError(_ZERO_G_GUARD_MESSAGE)
+
+    def _reject_if_cart_in_flight(self) -> None:
+        """Refuse to enter zero gravity while a cartesian plan is playing.
+
+        Two signals, as on the real arm: the cartesian slot being held, and the
+        live ``cart_busy`` bit. Either alone can be mid-flip, so both are
+        checked — the lock is taken without blocking, because "somebody is
+        using the link" and "a plan is running" answer the same question here.
+        The message is litearm_core's ``CART_IN_FLIGHT_GUARD_MESSAGE`` word for
+        word: refusing without naming a better stop action leaves the operator
+        stuck, which is exactly why that text spells out ``movej()`` and
+        ``emergency_stop()``.
+        """
+        got = self._motion_serial.acquire(blocking=False)
+        if got:
+            self._motion_serial.release()
+        busy = self._cart_busy or self.get_status_now().value.cart_busy
+        if busy or not got:
+            raise InvalidCommandError(
+                "笛卡尔运动在途, 拒绝进入零重力 (中途进场会丢掉位置环、只剩重力前馈, "
+                "臂会靠摩擦滑停): 先 arm.movej() 受控接管收口, 或 arm.emergency_stop() "
+                "急停, 或等它结束再进入")
+
     def recover_joint_limits(
         self,
         speed: float = 0.05,
@@ -1159,7 +1454,8 @@ class PyBulletArm:
         if goto_start:
             self.movej(q_path[0], speed=goto_speed)
 
-        interval = self._rate_interval(self._dt, self._check_speed(speed, "replay_joint_path"))
+        interval = self._rate_interval(self._dt, self._governed(
+            self._check_speed(speed, "replay_joint_path")))
         self._play(q_path, interval)
         return self._arrive(q_path[-1])
 
@@ -1218,7 +1514,7 @@ class PyBulletArm:
         gen = self._new_generation()
         t_prev = traj_t[0]
         for q_des, t in zip(traj_q, traj_t):
-            gap = (t - t_prev) / max(sp, _SPEED_FLOOR)
+            gap = (t - t_prev) / self._governed(sp)
             t_prev = t
             self._control_sleep_with_abort(max(gap, self._dt))
             if self._stopped or self._motion_gen != gen:
@@ -1375,18 +1671,66 @@ class PyBulletArm:
 
     # ── Emergency Stop ─────────────────────────────────────────────────────────
 
-    def request_stop(self) -> None:
-        """Emergency stop the simulation."""
+    def emergency_stop(self) -> None:
+        """Cut motor authority now: the arm stops wherever it is and holds nothing.
+
+        A latched stop: nothing moves again until :meth:`reset`. Drain power is
+        always allowed — this stays reachable while the arm is in zero-gravity
+        or in the middle of a cartesian plan, and it cancels that plan rather
+        than waiting for it.
+        """
+        self._cancel_motion()
         self._stopped = True
+        self._mode = _MODE_EMERGENCY
+        self._zero_g = False
         with self._lock:
             p.setJointMotorControlArray(
                 self._body, self._joints, p.VELOCITY_CONTROL,
                 forces=[0.0] * self._n_joints, physicsClientId=self._cid,
             )
 
-    def clear_stop(self) -> None:
-        """Clear the stop condition."""
+    def reset(self) -> None:
+        """Clear the emergency latch and any fault, returning to a ready idle.
+
+        Also restores the global speed governor to 100%: the firmware's
+        ``gov_ratio`` does not survive a reset either, so a script that set 5%
+        and then hit the stop button does not come back up creeping. Jets of
+        commanded motion do not survive it either — the arm holds the pose it is
+        in, as after a real reset.
+        """
+        self._reject_in_zero_g()
+        self._cancel_motion()
         self._stopped = False
+        self._mode = _MODE_INIT
+        self._zero_g = False
+        self._gov_ratio = 1.0
+        self._mit_tau = np.zeros(self._n_joints)
+        self._enabled = True
+        with self._lock:
+            q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
+            self._controller.set_target(q_current)
+
+    def request_stop(self) -> None:
+        """Deprecated: use :meth:`emergency_stop`."""
+        _warn_deprecated("request_stop", "emergency_stop")
+        self.emergency_stop()
+
+    def clear_stop(self) -> None:
+        """Deprecated: use :meth:`reset`."""
+        _warn_deprecated("clear_stop", "reset")
+        self.reset()
+
+    def _cancel_motion(self) -> None:
+        """Supersede whatever is in flight, the way a stop or reset does.
+
+        Bumping the generation is what actually stops a path being pushed: the
+        playing loop sees the mismatch and yields the cartesian slot. Applying
+        it on the way into *every* stop/reset path, rather than each of them
+        clearing flags by hand, is what keeps "stopped" from meaning different
+        things depending on which method was called.
+        """
+        self._new_generation()
+        self._cart_busy = False
 
     # ── Enable / Disable ───────────────────────────────────────────────────────
 
@@ -1394,10 +1738,12 @@ class PyBulletArm:
         """Enable motors and hold the current pose.
 
         ``attempts`` is accepted for signature parity with litearm_core, where it
-        retries the firmware's "retryable" enable errors. The simulation cannot
-        fail to enable, so it never retries — the parameter is described rather
-        than silently ignored.
+        retries the firmware's "retryable" enable errors (code 0x03 — "feedback
+        not ready", the normal first-enable path on real hardware). The
+        simulation cannot fail to enable, so it never retries and never sleeps:
+        the parameter is described rather than silently ignored.
         """
+        self._reject_in_zero_g()
         self._enabled = True
         self._stopped = False
         self._mode = _MODE_INIT
@@ -1406,8 +1752,16 @@ class PyBulletArm:
             self._controller.set_target(q_current)
 
     def disable(self) -> None:
-        """Disable motors (arm will drop under gravity)."""
+        """Cut motor authority so the arm drops under gravity.
+
+        A drain-power direction, so it stays reachable in every other mode: it
+        ends zero-gravity and cancels an in-flight cartesian plan rather than
+        refusing while one is running.
+        """
+        self._cancel_motion()
         self._enabled = False
+        self._zero_g = False
+        self._mode = _MODE_INIT
         with self._lock:
             p.setJointMotorControlArray(
                 self._body, self._joints, p.VELOCITY_CONTROL,
@@ -1432,9 +1786,65 @@ class PyBulletArm:
         """Get current PD gains."""
         return {"kp": self._controller.kp.tolist(), "kd": self._controller.kd.tolist()}
 
-    def clear_faults(self) -> List[Tuple[int, int]]:
-        """Clear motor faults (no-op in simulation)."""
-        return []
+    def clear_faults(self) -> None:
+        """Clear latched motor faults.
+
+        Returns ``None``, like ``litearm_core.Arm.clear_faults`` — the previous
+        signature returned a list of ``(index, code)`` pairs, which invited
+        ``if arm.clear_faults():`` and read as failure when nothing was wrong.
+        The simulation raises no faults, so there is nothing to report; the
+        state is still made readable again, since a caller who reached for this
+        usually wants the arm usable afterwards.
+        """
+        self._reject_in_zero_g()
+        self._stopped = False
+        self._zero_g = False
+        if self._mode == _MODE_EMERGENCY:
+            self._mode = _MODE_INIT
+
+    def park(self) -> None:
+        """Declare the arm parked: hold the pose at full stiffness."""
+        self.set_motion_mode(0)
+
+    def set_motion_mode(self, mode: int) -> None:
+        """Declare a motion mode. This firmware only understands ``0`` (park).
+
+        Any other value raises ``InvalidCommandError`` rather than sending a
+        command whose only effect would be to clear the park declaration — the
+        firmware answers ACK while its mode does not change, so accepting it
+        would report success for something that did not happen. The simulation
+        keeps the same line: there is no mode to switch to, so claiming one
+        would be a lie with an ACK on it.
+        """
+        self._reject_in_zero_g()
+        m = int(mode)
+        if not 0 <= m <= 255:
+            raise InvalidCommandError(f"mode 需 0..255 (给的是 {mode})")
+        if m != 0:
+            raise InvalidCommandError(
+                f"set_motion_mode({m}): 本固件只识别 0 (park 声明) —— 其它值固件回 ACK "
+                f"但模式不变; 要声明 park 请用 arm.park()")
+
+    def set_speed(self, percent: int) -> None:
+        """Set the **global** speed governor to an integer percentage 0..100.
+
+        Not the same knob as ``speed`` on a motion call: that is a 0..1
+        fraction for one trajectory, this scales every motion until
+        :meth:`reset`. ``set_speed(1)`` means *1%*, so calling it with a 0..1
+        value thinking it is a multiplier gives an arm that creeps.
+
+        Only an ``int`` is accepted; ``bool`` is rejected despite being an
+        ``int`` subclass, because ``set_speed(True)`` reads as "on" and would
+        silently mean 1%.
+        """
+        self._reject_in_zero_g()
+        if isinstance(percent, bool) or not isinstance(percent, int):
+            raise InvalidCommandError(
+                f"percent 需整数百分比 0..100 (给的是 {percent!r}); "
+                f"若手里是 0..1 的倍率请乘 100")
+        if not 0 <= percent <= 100:
+            raise InvalidCommandError("percent 需 0..100")
+        self._gov_ratio = percent / 100.0
 
     def set_payload(
         self, mass: float, com: Tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -1629,6 +2039,26 @@ class PyBulletArm:
                 p.resetJointState(self._body, jid, targetValue=float(qi),
                                   physicsClientId=self._cid)
             self._controller.set_target(q_arr)
+
+
+class _ZeroGSession:
+    """The handle ``PyBulletArm.zero_g()`` returns, usable as a context manager.
+
+    Same shape as litearm-core's ``_ZeroGSession``: entering the block yields
+    the arm, leaving it stops zero gravity. Leaving it may also report why the
+    session was lost, but never in a way that hides an exception from the block
+    body — an error raised inside the ``with`` is the one worth seeing.
+    """
+
+    def __init__(self, arm: "PyBulletArm") -> None:
+        self._arm = arm
+
+    def __enter__(self) -> "PyBulletArm":
+        return self._arm
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self._arm.zero_g_stop(raise_on_lost=exc_type is None)
+        return False
 
 
 class _SimDevice:

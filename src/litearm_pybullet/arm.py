@@ -161,6 +161,15 @@ _ZG_KEEPALIVE_S = 0.04
 _ZG_PERIOD_MIN = 0.005
 _ZG_PERIOD_MAX = 0.10
 
+#: How often the real arm is polled in mirror mode, and how long one such read
+#: may block. litearm-core has no background reader thread, so every mirrored
+#: frame costs a serial round trip; the physics loop runs at 500 Hz and asking
+#: the link 500 times a second is what `rate_hz` exists to prevent. The read has
+#: its own short timeout so a silent link bounds the mirror thread instead of
+#: letting it sit in a 0.5 s read.
+_MIRROR_RATE_HZ = 50.0
+_MIRROR_READ_TIMEOUT = 0.05
+
 #: Refusal text for action commands sent while zero gravity is held — copied
 #: verbatim from litearm_core's ``ZERO_G_GUARD_MESSAGE``. Callers match on the
 #: wording (the SDK's own cartesian guard compares against the same constant),
@@ -451,10 +460,12 @@ class PyBulletArm:
         self._arrive_frames = int(arrive_frames)
         self._move_timeout = float(move_timeout)
 
-        # Mirror mode
+        # Mirror mode: a real arm's state drives this simulation's target.
         self._mirror_arm: Optional[Any] = None
         self._mirror_thread: Optional[threading.Thread] = None
         self._mirroring = False
+        self._mirror_rate_hz = _MIRROR_RATE_HZ
+        self._mirror_error: Optional[BaseException] = None
 
         # Simulated devices
         self._devices: Optional[Any] = None
@@ -504,12 +515,10 @@ class PyBulletArm:
             return
         self.zero_g_stop()
         self._sim_running = False
-        self._mirroring = False
+        self.stop_mirroring()
 
         if self._sim_thread and self._sim_thread.is_alive():
             self._sim_thread.join(timeout=2.0)
-        if self._mirror_thread and self._mirror_thread.is_alive():
-            self._mirror_thread.join(timeout=2.0)
         try:
             p.disconnect(self._cid)
         except Exception:
@@ -550,16 +559,6 @@ class PyBulletArm:
             loop_start = time.time()
 
             with self._lock:
-                # Mirror mode: read real arm state and set as target
-                if self._mirroring and self._mirror_arm is not None:
-                    try:
-                        real_state = self._mirror_arm.get_state()
-                        if real_state and real_state.get("q"):
-                            q_real = np.asarray(real_state["q"], dtype=float)[:self._n_joints]
-                            self._controller.set_target(q_real)
-                    except Exception:
-                        pass
-
                 # Compute control
                 q_actual = np.zeros(self._n_joints)
                 dq_actual = np.zeros(self._n_joints)
@@ -1987,30 +1986,99 @@ class PyBulletArm:
 
     # ── Mirror Mode ────────────────────────────────────────────────────────────
 
-    def mirror_from(self, real_arm: Any, rate_hz: float = 50.0) -> None:
+    def mirror_from(self, real_arm: Any, rate_hz: float = _MIRROR_RATE_HZ) -> None:
         """Start mirroring the state of a real arm into this simulation.
 
+        A daemon thread polls ``real_arm`` and puts each frame's joint vector
+        into the simulation, so the arm on screen follows the physical one.
+
         Args:
-            real_arm: A litearm.Arm instance connected to a real robot.
-            rate_hz: Mirroring update rate (Hz).
+            real_arm: A ``litearm_core.Arm`` (anything answering
+                ``get_state(refresh=True)`` with a ``Msg`` whose ``value.q`` is
+                the joint vector).
+            rate_hz: How often to poll. Every frame is a serial round trip — the
+                link has no background reader to consume — so this is a real
+                load on the wire, not a display preference.
+
+        The read is ``refresh=True`` on purpose: ``refresh=False`` would hand
+        back the last frame *this caller* read, and a mirror that reports the
+        same pose forever is exactly the failure you cannot see.
+
+        Do not send commands to ``real_arm`` yourself while mirroring: the two
+        readers steal each other's frames (litearm-core counts that as
+        ``_foreign``). Call :meth:`stop_mirroring` first.
 
         Usage::
 
-            import litearm
-            real = litearm.Arm(endpoint="tcp/192.168.31.139:7447")
+            import litearm_core as pa
+            real = pa.Arm(port="/dev/ttyACM0").connect()
             sim = PyBulletArm(render=True)
-            sim.start()
+            sim.connect()
             sim.mirror_from(real)
             # Now sim follows real arm's motion
         """
+        self.stop_mirroring()
         self._mirror_arm = real_arm
+        self._mirror_rate_hz = float(rate_hz)
+        self._mirror_error = None
         self._mirroring = True
         self._ensure_running()
+        self._mirror_thread = threading.Thread(
+            target=self._mirror_loop, daemon=True, name="pybullet_mirror"
+        )
+        self._mirror_thread.start()
 
     def stop_mirroring(self) -> None:
-        """Stop mirroring the real arm."""
+        """Stop mirroring the real arm (idempotent)."""
         self._mirroring = False
+        thread, self._mirror_thread = self._mirror_thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
         self._mirror_arm = None
+
+    def _mirror_loop(self) -> None:
+        """Poll the real arm at ``rate_hz`` and drive the simulation's target."""
+        period = 1.0 / max(self._mirror_rate_hz, 1e-3)
+        while self._mirroring:
+            started = time.monotonic()
+            try:
+                msg = self._mirror_arm.get_state(
+                    refresh=True, timeout=_MIRROR_READ_TIMEOUT
+                )
+                q_real = getattr(msg.value, "q", None)
+                if q_real is None:
+                    raise MotionTimeoutError(
+                        "镜像: 真臂没有回帧 (Msg.value 为 None)"
+                    )
+                if len(q_real) < self._n_joints:
+                    raise InvalidCommandError(
+                        f"镜像: 真臂只有 {len(q_real)} 个关节, 仿真有 {self._n_joints} 个"
+                    )
+                # Teleport rather than chase the target through the PD loop: the
+                # point of a mirror is to show where the real arm *is*, not how
+                # well the simulation would have tracked it.
+                self.set_joint_positions(list(q_real))
+                self._mirror_error = None
+            except Exception as exc:  # noqa: BLE001 - a dropped frame must not
+                # end the mirror: the link is allowed to be quiet for a while.
+                # It is *recorded* so "mirroring silently does nothing" stays
+                # diagnosable — read `mirror_error`.
+                self._mirror_error = exc
+            time.sleep(max(0.0, period - (time.monotonic() - started)))
+
+    @property
+    def mirroring(self) -> bool:
+        """True while the mirror thread is polling a real arm."""
+        return self._mirroring
+
+    @property
+    def mirror_error(self) -> Optional[BaseException]:
+        """Why the last mirror frame failed, or ``None`` if it worked.
+
+        The mirror loop cannot raise into the caller — it runs on its own
+        thread — so this is how a failed mirror is told apart from an idle one.
+        """
+        return self._mirror_error
 
     # ── Internal Helpers ───────────────────────────────────────────────────────
 

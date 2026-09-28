@@ -1,0 +1,39 @@
+name: CI
+
+# Test gate for this repository. It runs on pull requests and on pushes to the
+# default branch; releases live in their own workflow (see .github/workflows/release.yml).
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true # a superseded pull request run is pointless
+
+jobs:
+  # The job must be named `test`: that is the required status check.
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          # pybullet ships manylinux wheels only up to CPython 3.11
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest -q

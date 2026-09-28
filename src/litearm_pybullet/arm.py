@@ -60,6 +60,7 @@ from .controller import DEFAULT_KD, DEFAULT_KP, N_JOINTS, JointPIDController, Tr
 # `_rotation_error` is the solver's own rotation metric; using it here too keeps
 # "did we arrive" measured the same way the optimizer measured it.
 from .kinematics import Kinematics, _rotation_error
+from .trajectory import JointTrajectory, TrajectoryFrame
 
 # Path to the default URDF model
 _ASSETS_DIR = Path(__file__).parent / "assets"
@@ -1535,8 +1536,6 @@ class PyBulletArm:
         **kwargs: Any,
     ) -> RobotState:
         """Simulation-only: load and replay a saved trajectory."""
-        from ._litearm.types import JointTrajectory
-
         if isinstance(trajectory, str):
             traj = JointTrajectory.load(trajectory)
         elif isinstance(trajectory, JointTrajectory):
@@ -1557,14 +1556,6 @@ class PyBulletArm:
         **kwargs: Any,
     ) -> Any:
         """Record a trajectory (simulated)."""
-        try:
-            from ._litearm.types import JointTrajectory, TrajectoryFrame
-        except ImportError:
-            raise ImportError(
-                "record_trajectory requires litearm-pybullet[mirror] dependencies. "
-                "Install with: pip install litearm-pybullet[mirror]"
-            )
-
         self._ensure_running()
 
         if duration_s is None:

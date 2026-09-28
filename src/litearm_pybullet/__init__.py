@@ -31,16 +31,21 @@ Usage::
 
 __version__ = "0.1.0"
 
+from ._compat import HAS_LITEARM_CORE, litearm_core
 from .arm import PyBulletArm
 from .mirror import DualArm, MirrorMode
-
-# Re-export vendored litearm SDK for convenience (dual/mirror mode)
-from . import _litearm as litearm
+from .trajectory import JointTrajectory, TrajectoryFrame
 
 __all__ = [
     "__version__",
     "PyBulletArm",
     "DualArm",
     "MirrorMode",
-    "litearm",
+    "JointTrajectory",
+    "TrajectoryFrame",
+    # The real-arm SDK, when it is installed — None otherwise. Its absence is
+    # the normal case for a simulation-only install, which is why it is here as
+    # a name that can be None rather than an ImportError.
+    "HAS_LITEARM_CORE",
+    "litearm_core",
 ]

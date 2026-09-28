@@ -1,17 +1,20 @@
-"""Vendored subset of litearm-python SDK for trajectory types.
+"""Recorded-trajectory types for the simulation.
 
-This is a minimal subset used by PyBulletArm.record_trajectory() and
-play_trajectory() for the JointTrajectory/TrajectoryFrame types.
+``JointTrajectory``/``TrajectoryFrame`` are what
+:meth:`PyBulletArm.record_trajectory` returns and
+:meth:`PyBulletArm.play_trajectory` accepts — a joint path with timing, saved
+and loaded as JSON.
 
-For full real-arm communication (DualArm, MirrorMode), the actual
-litearm-python package must be installed separately.
+Simulation-only: litearm-core has no equivalent. Its motion calls take a target
+and block until the arm arrives; a trajectory is only something you can record
+and replay here, since the simulation is the thing that can measure a path
+frame by frame without a real arm's firmware owning the timing.
 """
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 
 class TrajectoryFrame:

@@ -13,8 +13,7 @@
 """
 import time
 
-from litearm_pybullet import PyBulletArm
-from litearm_pybullet._litearm.types import JointTrajectory
+from litearm_pybullet import JointTrajectory, PyBulletArm
 
 
 def main():

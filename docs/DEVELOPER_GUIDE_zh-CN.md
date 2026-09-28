@@ -1,7 +1,7 @@
 # litearm-pybullet 开发者指南
 
-> 基于 litearm-pybullet v0.1.0，真机后端已迁移到 `litearm-core` 2.1.0。
-> 如果你在移植针对老的 Zenoh 版 `litearm-python` 写的代码，先看
+> 基于 litearm-pybullet v0.1.0，真机后端已迁移到 `litearm-python` 2.1.0。
+> 如果你在移植针对老的 Zenoh 版 `litearm-python` 0.1.0 写的代码，先看
 > [从 0.1 迁移](#从-01litearm-python-时代迁移) 那一节。
 
 ## 项目结构
@@ -14,8 +14,8 @@ litearm-pybullet/
 ├── .gitignore
 ├── src/
 │   └── litearm_pybullet/
-│       ├── __init__.py         # 导出 PyBulletArm, DualArm, MirrorMode, HAS_LITEARM_CORE
-│       ├── arm.py              # 核心：PyBulletArm 类（与 litearm_core.Arm 对齐）
+│       ├── __init__.py         # 导出 PyBulletArm, DualArm, MirrorMode, HAS_LITEARM
+│       ├── arm.py              # 核心：PyBulletArm 类（与 litearm.Arm 对齐）
 │       ├── controller.py       # PID 关节控制器 + 梯形速度轨迹生成器
 │       ├── kinematics.py       # 正逆运动学（FK/IK）+ 路径规划
 │       ├── mirror.py           # DualArm（双控）+ MirrorMode（镜像）
@@ -50,7 +50,7 @@ litearm-pybullet/
 ┌──────────────────────────────────────────────────┐
 │                 你的 Python 程序                   │
 │                                                    │
-│  arm = PyBulletArm(render=True)  ← 可替换为 litearm_core.Arm │
+│  arm = PyBulletArm(render=True)  ← 可替换为 litearm.Arm │
 │  arm.movej(...) / arm.get_state() / arm.close()    │
 └──────────┬──────────────────┬────────────────────┘
            │                  │
@@ -58,24 +58,24 @@ litearm-pybullet/
     │ 独立仿真     │    │ 双控 / 镜像         │
     │             │    │                    │
     │ PyBullet    │    │ PyBullet +         │
-    │ 物理引擎    │    │ litearm-core       │
+    │ 物理引擎    │    │ litearm-python       │
     │ PID 控制器  │    │ (USB CDC)          │
     └─────────────┘    └────────────────────┘
 ```
 
-没有 server 层：`litearm-core` 直连固件的 USB CDC 协议。整个技术栈里没有
+没有 server 层：`litearm-python` 直连固件的 USB CDC 协议。整个技术栈里没有
 `endpoint`、没有 `arm_id`、也没有 Zenoh。
 
 ### 模块职责
 
 | 模块 | 职责 |
 |------|------|
-| `arm.py` | 主类 `PyBulletArm`，31 个方法与 `litearm_core.Arm` 1:1 对齐，后台线程运行物理仿真 |
+| `arm.py` | 主类 `PyBulletArm`，31 个方法与 `litearm.Arm` 1:1 对齐，后台线程运行物理仿真 |
 | `controller.py` | `JointPIDController` 位置控制器 + `TrajectoryGenerator` 梯形速度轨迹生成 |
 | `kinematics.py` | `Kinematics` 类：FK（正运动学）、IK（阻尼最小二乘 + Levenberg-Marquardt 精化）+ 路径规划（直线/圆弧/多航点） |
 | `mirror.py` | `DualArm`（同时控制实臂+仿真）、`MirrorMode`（仿真跟随实臂） |
 | `_compat.py` | 决定 `Msg`/`RobotState`/`CartPlan`/异常/位姿辅助函数从哪来——能 import 到真 SDK 就用真的，否则用 `_fallback.py` |
-| `_fallback.py` | 本地结构等价物，类名与字段对齐 `litearm_core` 2.1.0，由 `tests/test_api_parity.py` 钉住 |
+| `_fallback.py` | 本地结构等价物，类名与字段对齐 `litearm` 2.1.0，由 `tests/test_api_parity.py` 钉住 |
 | `litearm.urdf` | URDF 模型：7 个铰链关节、真实 STL 网格几何、力矩电机 |
 
 ### 数据流
@@ -112,8 +112,8 @@ arm.movej(q_target, speed=0.5)
 
 ### 1. API 对齐
 
-PyBulletArm 有 31 个方法与 `litearm_core.Arm` 同名、同形参、同默认值、同返回类型、
-同异常。用户只需将 `litearm_core.Arm(port=...)` 替换为 `PyBulletArm(render=True)`
+PyBulletArm 有 31 个方法与 `litearm.Arm` 同名、同形参、同默认值、同返回类型、
+同异常。用户只需将 `litearm.Arm(port=...)` 替换为 `PyBulletArm(render=True)`
 即可在仿真环境中运行相同的控制代码。
 
 ```
@@ -130,10 +130,10 @@ move_js, send_mit, send_mit_all
 镜像、阻抗模式、手爪/设备代理、配置/日志/服务罐头接口、`n`/`firmware`/`port`），
 另有 7 个是**已废弃的 0.1 老名**，每个都只转发到一个新方法。
 
-`_compat.py` 的重点是**类型同一性**：装了 `litearm-core` 时，仿真 import 的是**它的**
-`Msg`、`RobotState`、`CartPlan` 和异常类，所以 `except litearm_core.MotionTimeoutError`
+`_compat.py` 的重点是**类型同一性**：装了 `litearm-python` 时，仿真 import 的是**它的**
+`Msg`、`RobotState`、`CartPlan` 和异常类，所以 `except litearm.MotionTimeoutError`
 也能接住仿真里的失败。没装时由 `_fallback.py` 提供结构完全一致的本地副本。
-`litearm_pybullet.HAS_LITEARM_CORE` 告诉你当前是哪一种。
+`litearm_pybullet.HAS_LITEARM` 告诉你当前是哪一种。
 
 ### 2. 三种操作模式
 
@@ -149,12 +149,12 @@ move_js, send_mit, send_mit_all
 - `get_state()` 返回状态缓存的快照，不会阻塞仿真循环
 - 运动学计算使用实时的 PyBullet client（关节状态重置的作用域限定在 FK/IK 调用内）
 - 镜像在它自己的守护线程里跑：读实臂、写关节位置。**镜像运行期间不要再给同一个
-  实臂对象发命令**——litearm-core 会把另一个读者算作外来帧。先调 `stop_mirroring()`。
+  实臂对象发命令**——litearm-python 会把另一个读者算作外来帧。先调 `stop_mirroring()`。
 
 ### 4. 零依赖独立模式
 
 独立仿真模式只需 `pybullet>=3.2.5` 和 `numpy>=1.21`。镜像/双控模式需要
-`litearm-pybullet[mirror]` extra，它对 `litearm-core` 的依赖是可选且**延迟加载**的
+`litearm-pybullet[mirror]` extra，它对 `litearm-python` 的依赖是可选且**延迟加载**的
 ——不主动要求镜像时，仿真绝不会去 import 它。
 
 ## URDF 模型 (litearm.urdf)
@@ -198,8 +198,8 @@ move_js, send_mit, send_mit_all
 
 ### 可选依赖（镜像/双控模式）
 
-- `litearm-core` —— **没有上 PyPI**。`[mirror]` extra 里写的就是这个名字，但它在
-  PyPI 上解析不到，所以要从源码装：`pip install -e ../litearm-core`
+- `litearm-python` —— **没有上 PyPI**。`[mirror]` extra 里写的就是这个名字，但它在
+  PyPI 上解析不到，所以要从源码装：`pip install -e ../litearm-python`
 
 ### 安装
 
@@ -208,7 +208,7 @@ move_js, send_mit, send_mit_all
 pip install litearm-pybullet
 
 # 镜像/双控模式（需要真机通信）
-pip install -e ../litearm-core     # 先装这个：没上 PyPI
+pip install -e ../litearm-python     # 先装这个：没上 PyPI
 pip install "litearm-pybullet[mirror]"
 ```
 
@@ -260,7 +260,7 @@ finally:
 ```
 
 `connect(port=None)` 启动后台仿真线程并返回 `self`。`port` 只为兼容
-`litearm_core.Arm(port=...)` 的签名而存在，仿真这边没有串口可开，会被忽略。
+`litearm.Arm(port=...)` 的签名而存在，仿真这边没有串口可开，会被忽略。
 `connect()` 是幂等的。`start()` 是它的老名字，仍然可用，但不建议新代码再用。
 `disconnect()` 是 `close()` 的别名，对齐 SDK 的命名。
 
@@ -285,7 +285,7 @@ arm.close()
 
 ## API 参考
 
-以下所有方法均为 `PyBulletArm` 的实例方法。带 ⭐ 的与 `litearm_core.Arm` 1:1 对齐；
+以下所有方法均为 `PyBulletArm` 的实例方法。带 ⭐ 的与 `litearm.Arm` 1:1 对齐；
 带 🔷 的是**仿真独有**；带 ⚠️ 的是**已废弃的 0.1 老名**（纯转发别名，各发一条
 `DeprecationWarning`）。
 
@@ -330,7 +330,7 @@ arm.close()
 
 ### 状态读取
 
-三个读接口都返回 `Msg` 信封（`litearm-core` 2.0 起如此）：负载在 `.value`，
+三个读接口都返回 `Msg` 信封（`litearm-python` 2.0 起如此）：负载在 `.value`，
 `.hz` 是实测帧到达频率，`.timestamp` 是最近一帧的本地 `time.monotonic()`。
 还没有帧时 `value` 为 `None`。
 
@@ -435,7 +435,7 @@ arm.close()
 | `save_trajectory(id, name, points, duration)` | 保存轨迹（兼容空实现） |
 | `delete_trajectory(id)` | 删除轨迹（兼容空实现） |
 
-`JointTrajectory` / `TrajectoryFrame` 是**仿真独有**的数据类型：`litearm-core` 里
+`JointTrajectory` / `TrajectoryFrame` 是**仿真独有**的数据类型：`litearm-python` 里
 根本没有"轨迹对象"这回事。
 
 ### 运动学计算（纯计算，不推进仿真）
@@ -467,7 +467,7 @@ arm.close()
 | `stop_mirroring()` | 停止镜像并 join 线程（最多 2 秒），幂等 |
 | `mirroring` / `mirror_error` | 镜像线程是否在跑 / 失败原因（健康时为 `None`） |
 
-**`rate_hz` 是真实负载，不是显示偏好**：每一帧都是一次串口往返，而 litearm-core
+**`rate_hz` 是真实负载，不是显示偏好**：每一帧都是一次串口往返，而 litearm-python
 没有后台读线程，按 500 Hz 物理步逐帧请求会打死链路。默认 50 Hz 是刻意的。
 
 镜像里读的是 `get_state(refresh=True)`——`refresh=False` 会一直回同一帧，
@@ -514,12 +514,12 @@ with PyBulletArm(render=True) as arm:
 **前提条件：**
 
 - 机械臂已通过 USB 接上（CDC 串口）
-- 客户端已装 `litearm-core`（没上 PyPI，从源码装：`pip install -e ../litearm-core`）
+- 客户端已装 `litearm-python`（没上 PyPI，从源码装：`pip install -e ../litearm-python`）
 
 ```python
 import time
 
-import litearm_core as pa
+import litearm as pa
 
 from litearm_pybullet import PyBulletArm
 
@@ -555,7 +555,7 @@ finally:
 也可以使用 `MirrorMode` 类（等效封装）：
 
 ```python
-import litearm_core as pa
+import litearm as pa
 
 from litearm_pybullet import PyBulletArm, MirrorMode
 
@@ -753,7 +753,7 @@ A: `ik()` 现在**抛 `IKError`**，不再返回 `(q, False)`。可能原因：
 - 目标位姿在奇异点附近
 - 尝试传入不同的 `q_seed` 初始猜测值
 
-装了 `litearm-core` 时 `IKError` 继承它的异常体系，所以一条 `except` 能同时覆盖
+装了 `litearm-python` 时 `IKError` 继承它的异常体系，所以一条 `except` 能同时覆盖
 仿真与实机。
 
 ### Q: `movej` 抛了 `MotionTimeoutError`
@@ -763,15 +763,15 @@ A: 在 `move_timeout` 秒内，关节始终没有做到"位置误差小于 `q_to
 或者 `speed` 太低没跑完。这里**没有 `settle_s` 可以调**——请调构造参数里的
 `move_timeout` 或两个容差。
 
-### Q: 双控/镜像模式报错说没装 litearm-core
+### Q: 双控/镜像模式报错说没装 litearm-python
 
-A: `litearm-core` 没有上 PyPI，要从源码装：
+A: `litearm-python` 没有上 PyPI，要从源码装：
 
 ```bash
-pip install -e ../litearm-core
+pip install -e ../litearm-python
 ```
 
-独立仿真不需要它；`litearm_pybullet.HAS_LITEARM_CORE` 能告诉你当前有没有 import 到。
+独立仿真不需要它；`litearm_pybullet.HAS_LITEARM` 能告诉你当前有没有 import 到。
 
 ### Q: 轨迹录制不包含实际运动数据
 
@@ -796,7 +796,7 @@ A: 确认调过 `connect()`（或用了上下文管理器）。检查是否调�
 
 ### 可选依赖（镜像/双控模式）
 
-- `litearm-core`（USB CDC 直连固件；**没上 PyPI**，用 `pip install -e ../litearm-core`）
+- `litearm-python`（USB CDC 直连固件；**没上 PyPI**，用 `pip install -e ../litearm-python`）
 
 ## 已知限制
 
@@ -812,13 +812,15 @@ A: 确认调过 `connect()`（或用了上下文管理器）。检查是否调�
 
 ## 从 0.1（litearm-python 时代）迁移
 
-真机后端原来用的是 Zenoh 版的 `litearm-python` 0.1.0，现在是 `litearm-core`
-（USB CDC 直连固件），仿真侧 API 跟着对齐。
+`litearm-python` 这个名字底下是两个只共享 `import` 一行的 SDK：0.1.0 是 Zenoh
+客户端，对的是一个独立的 `litearm-server` 进程，用 `endpoint=`/`arm_id=` 寻址；
+2.1 是薄客户端，直接走 USB CDC 说固件协议，构造参数是 `port=`。本仓真机后端
+用的是 2.1。
 
-| 0.1 | 现在 |
+| 0.1（server 时代） | 2.1（USB CDC） |
 |---|---|
-| `import litearm` | `import litearm_core` |
-| `litearm.Arm(endpoint="tcp/host:7447", arm_id="armA")` | `litearm_core.Arm(port="/dev/ttyACM0")` |
+| `litearm-python` 0.1.0，`import litearm` | `litearm-python` 2.1，还是 `import litearm` |
+| `litearm.Arm(endpoint="tcp/host:7447", arm_id="armA")` | `litearm.Arm(port="/dev/ttyACM0")` |
 | `DualArm(real_endpoint=..., real_arm_id=...)` | `DualArm(real_port=...)` |
 | `arm.start()` | `arm.connect()`（别名还在，但不建议继续用） |
 | `state = arm.get_state(); state["q"]` | `arm.get_state().value.q` |

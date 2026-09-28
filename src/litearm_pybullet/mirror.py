@@ -5,7 +5,7 @@ the simulation and then run against hardware with the same motion. ``MirrorMode`
 is the opposite direction: the simulation follows the real arm, for watching the
 real arm's state.
 
-Both need ``litearm-core`` (the real-arm SDK). The simulation half needs only
+Both need ``litearm-python`` (the real-arm SDK). The simulation half needs only
 pybullet + numpy.
 
 Usage::
@@ -19,7 +19,7 @@ Usage::
     dual.close()
 
     # Mode 2: mirror — the simulation follows the real arm
-    import litearm_core as pa
+    import litearm as pa
     real = pa.Arm(port="/dev/ttyACM0").connect()
     sim = PyBulletArm(render=True)
     sim.connect()
@@ -45,11 +45,11 @@ _MIRROR_READ_TIMEOUT = 0.05
 
 
 def _require_sdk() -> None:
-    """Raise the install hint when ``litearm_core`` is not importable."""
-    if not _compat.HAS_LITEARM_CORE:
+    """Raise the install hint when ``litearm`` is not importable."""
+    if not _compat.HAS_LITEARM:
         raise ImportError(
-            "DualArm/MirrorMode 需要 litearm-core (真机后端)。它不在 PyPI 上, "
-            "要从源码装: pip install -e ../litearm-core"
+            "DualArm/MirrorMode 需要 litearm-python (真机后端)。它不在 PyPI 上, "
+            "要从源码装: pip install -e ../litearm-python"
         ) from _compat.SDK_IMPORT_ERROR
 
 
@@ -221,8 +221,8 @@ class DualArm:
         """Initialize DualArm and connect both arms.
 
         Args:
-            real_port: Serial port of the real arm. ``None`` lets litearm-core
-                find the single CDC device, as ``litearm_core.Arm()`` does.
+            real_port: Serial port of the real arm. ``None`` lets litearm-python
+                find the single CDC device, as ``litearm.Arm()`` does.
             sim_model_path: Path to URDF model (default: built-in).
             render: Whether to open the PyBullet GUI.
             mirror_first: If True, :meth:`start` waits for the real arm's first
@@ -427,7 +427,7 @@ class DualArm:
 
     @property
     def real(self) -> Any:
-        """The ``litearm_core.Arm``, for anything this wrapper does not forward."""
+        """The ``litearm.Arm``, for anything this wrapper does not forward."""
         return self._real
 
     @property
@@ -477,7 +477,7 @@ class MirrorMode:
 
     Usage::
 
-        import litearm_core as pa
+        import litearm as pa
         from litearm_pybullet import PyBulletArm, MirrorMode
 
         real = pa.Arm(port="/dev/ttyACM0").connect()
@@ -494,7 +494,7 @@ class MirrorMode:
     def __init__(self, real_arm: Any, sim_arm: PyBulletArm,
                  rate_hz: float = _DEFAULT_MIRROR_HZ) -> None:
         """Args:
-            real_arm: A connected ``litearm_core.Arm``.
+            real_arm: A connected ``litearm.Arm``.
             sim_arm: The :class:`PyBulletArm` to drive.
             rate_hz: How often to poll the real arm. Every poll is a serial
                 round trip, so this is a load on the link, not a display

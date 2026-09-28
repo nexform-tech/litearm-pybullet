@@ -1,10 +1,10 @@
-"""Local stand-ins for the litearm-core public types, with no third-party deps.
+"""Local stand-ins for the litearm-python public types, with no third-party deps.
 
 The standalone simulation must keep working with nothing but ``pybullet`` and
-``numpy``, so ``litearm-core`` cannot be a hard dependency.  But the types and
+``numpy``, so ``litearm-python`` cannot be a hard dependency.  But the types and
 exceptions the simulation hands back have to stay *structurally identical* to
 the real SDK's — otherwise "swap ``PyBulletArm`` for the real ``Arm``" is a
-lie: ``except litearm_core.MotionTimeoutError`` would not catch a simulation
+lie: ``except litearm.MotionTimeoutError`` would not catch a simulation
 failure, and ``state.value.joints[i].q`` would not be the same expression.
 
 ``_compat`` is the single place that decides which implementation is in play
@@ -12,7 +12,7 @@ failure, and ``state.value.joints[i].q`` would not be the same expression.
 ``tests/test_api_parity.py``, which compares field names and signatures
 against the real SDK whenever it is importable.
 
-Aligned with: litearm-core 2.1.0.
+Aligned with: litearm-python 2.1.0.
 """
 from __future__ import annotations
 
@@ -26,13 +26,14 @@ __all__ = [
     "InvalidCommandError", "MotorFaultError", "MotionTimeoutError", "IKError",
     "CommandRejectedError", "UnsupportedByFirmwareError", "CartesianPlanError",
     "MotionSupersededError", "CartReplyLostError", "ArmIsInDfuError",
+    "ForkedSessionError", "TeleopBusyError", "TeleopLockedError",
     "MODE_NAMES", "FLAG_NAMES", "FLAG_ENABLED_BIT", "MAX_JOINTS",
     "CART_START_POS_TOL", "CART_START_RPY_TOL",
     "as_pose", "rpy_to_mat", "mat_to_rpy", "is_rotation",
 ]
 
 
-# ── Protocol constants (mirrors of litearm_core._protocol) ─────────────────────
+# ── Protocol constants (mirrors of litearm._protocol) ─────────────────────
 
 #: Firmware motion modes.  The simulation uses the same names for the same
 #: states so ``state.mode_name`` reads the same on both sides.
@@ -48,7 +49,7 @@ FLAG_ENABLED_BIT = 9
 MAX_JOINTS = 16
 
 #: How close a cartesian command's declared start must be to the measured TCP
-#: before it is accepted.  Same numbers, same meaning as litearm-core's
+#: before it is accepted.  Same numbers, same meaning as litearm-python's
 #: ``cart.CART_START_POS_TOL`` / ``CART_START_RPY_TOL``: the firmware's arc
 #: always starts from the *measured* TCP, so a mismatched ``pose_start`` would
 #: silently command a different arc than the caller described.
@@ -176,11 +177,21 @@ class CartPlan:
 # ── Errors ────────────────────────────────────────────────────────────────────
 
 class LiteArmError(Exception):
-    """Base class for every error this package (and litearm-core) raises."""
+    """Base class for every error this package (and litearm-python) raises."""
 
 
 class NotConnectedError(LiteArmError):
     """An entry point that needs a live link was called before ``connect()``."""
+
+
+class ForkedSessionError(NotConnectedError):
+    """A session built by the parent process was used after ``fork()``.
+
+    The SDK fails closed here: the child inherits the parent's file
+    descriptor, so two processes would drive one arm.  Unreachable in a
+    simulation — nothing here is a file descriptor — but it has to exist so
+    one ``except`` clause covers both implementations.
+    """
 
 
 class TransportError(LiteArmError):
@@ -237,6 +248,14 @@ class CartReplyLostError(LiteArmError):
 
 class ArmIsInDfuError(LiteArmError):
     """The arm is in the ROM bootloader; a new ``Arm`` is required."""
+
+
+class TeleopBusyError(LiteArmError):
+    """Teleoperation is mid-switch: ``enter_teleop``/``exit_teleop`` unfinished."""
+
+
+class TeleopLockedError(LiteArmError):
+    """Manual control was attempted while teleoperation holds the arm."""
 
 
 # ── Pose helpers (ZYX intrinsic, matching the firmware convention) ─────────────

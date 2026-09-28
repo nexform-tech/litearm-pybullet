@@ -1,10 +1,10 @@
 """PyBulletArm — PyBullet simulation of the LiteArm 7-DOF robot.
 
-API-compatible with ``litearm_core.Arm``. You can swap between real and
+API-compatible with ``litearm.Arm``. You can swap between real and
 simulated arms without changing your control code:
 
     # Real arm
-    arm = litearm_core.Arm(port=None).connect()   # first USB CDC device
+    arm = litearm.Arm(port=None).connect()   # first USB CDC device
 
     # Simulation
     arm = PyBulletArm()
@@ -15,11 +15,11 @@ simulated arms without changing your control code:
     tcp = arm.get_tcp().value            # -> (x, y, z, roll, pitch, yaw)
     arm.close()
 
-Reads are wrapped in :class:`~litearm_pybullet.Msg` exactly as in litearm-core
+Reads are wrapped in :class:`~litearm_pybullet.Msg` exactly as in litearm-python
 2.x: the getters that return "the latest frame" hand back ``Msg(value, hz,
 timestamp)``, so callers write ``.value`` on both sides.
 
-Simulation-only extras (no litearm-core counterpart) are marked as such in
+Simulation-only extras (no litearm-python counterpart) are marked as such in
 their docstrings: ``fk`` for an arbitrary configuration, ``plan_*``,
 ``record_trajectory``/``play_trajectory`` and the ``device``/``hand`` proxies.
 """
@@ -76,7 +76,7 @@ TAU_MAX = np.array([78.0, 78.0, 21.0, 21.0, 10.0, 10.0, 10.0])
 _MIN_INERTIA = 0.01
 _MIN_MASS = 0.5
 
-# Firmware mode ids, by the names litearm_core's MODE_NAMES uses.
+# Firmware mode ids, by the names litearm's MODE_NAMES uses.
 _MODE_INIT = 0
 _MODE_MOVE_J = 1
 _MODE_MOVE_P = 2
@@ -86,7 +86,7 @@ _MODE_MIT_ALL = 5
 _MODE_EMERGENCY = 6
 _MODE_ZERO_G = 7
 
-# flags bit10 = cartesian motion in progress.  litearm-core publishes no named
+# flags bit10 = cartesian motion in progress.  litearm-python publishes no named
 # constant for it: the only way to read it is RobotState.cart_busy, and it is
 # deliberately kept out of FLAG_NAMES (those are safety flags).
 _FLAG_CART_BUSY_BIT = 10
@@ -110,7 +110,7 @@ _IK_ROT_TOL = 0.05   # rad
 class _FrameStats:
     """Arrival statistics for one kind of frame, feeding ``Msg.hz``/``Msg.timestamp``.
 
-    Mirrors the bookkeeping litearm-core's ``Msg`` documents: ``hz`` is the
+    Mirrors the bookkeeping litearm-python's ``Msg`` documents: ``hz`` is the
     average rate over a short recent window (not a lifetime average, which
     would take forever to react to a rate change), ``timestamp`` the local
     ``time.monotonic()`` of the most recent frame, ``0.0`` if none yet.
@@ -152,7 +152,7 @@ _SPEED_FLOOR = 1e-3
 #: the two gets comparable numbers.
 _HOME_SPEED = 0.10
 
-#: Default zero-gravity keepalive period. litearm-core calls this
+#: Default zero-gravity keepalive period. litearm-python calls this
 #: ``ZG_KEEPALIVE_S`` and re-sends `ZERO_G` every 0.04 s to stay ahead of the
 #: firmware's 0.10 s watchdog. The simulation has no watchdog to feed, so the
 #: period is validated against the same window and otherwise unused — see
@@ -163,7 +163,7 @@ _ZG_PERIOD_MIN = 0.005
 _ZG_PERIOD_MAX = 0.10
 
 #: How often the real arm is polled in mirror mode, and how long one such read
-#: may block. litearm-core has no background reader thread, so every mirrored
+#: may block. litearm-python has no background reader thread, so every mirrored
 #: frame costs a serial round trip; the physics loop runs at 500 Hz and asking
 #: the link 500 times a second is what `rate_hz` exists to prevent. The read has
 #: its own short timeout so a silent link bounds the mirror thread instead of
@@ -172,7 +172,7 @@ _MIRROR_RATE_HZ = 50.0
 _MIRROR_READ_TIMEOUT = 0.05
 
 #: Refusal text for action commands sent while zero gravity is held — copied
-#: verbatim from litearm_core's ``ZERO_G_GUARD_MESSAGE``. Callers match on the
+#: verbatim from litearm's ``ZERO_G_GUARD_MESSAGE``. Callers match on the
 #: wording (the SDK's own cartesian guard compares against the same constant),
 #: so a paraphrase here would read as a different refusal.
 _ZERO_G_GUARD_MESSAGE = (
@@ -328,7 +328,7 @@ def _read_joint_state(body_id, joint_ids, client_id):
 class PyBulletArm:
     """PyBullet simulation of LiteArm 7-DOF robot arm.
 
-    API-compatible with ``litearm_core.Arm``: same method names, same argument
+    API-compatible with ``litearm.Arm``: same method names, same argument
     names and units, same return types, same exceptions. All motion methods are
     blocking — they step the simulation until the motion arrives — matching the
     real arm's behaviour.
@@ -341,8 +341,8 @@ class PyBulletArm:
             print(state.q)
 
         # Mirror real arm
-        import litearm_core
-        real = litearm_core.Arm(port=None).connect()
+        import litearm
+        real = litearm.Arm(port=None).connect()
         sim = PyBulletArm(render=True)
         sim.start()
         sim.mirror_from(real)  # sim follows real arm state
@@ -375,7 +375,7 @@ class PyBulletArm:
             n_joints: Number of joints (default 7).
             key_callback: Optional callback for keyboard events.
             q_tol: Arrival tolerance on joint position (rad), same name and
-                meaning as litearm_core's ``Arm(q_tol=...)``.
+                meaning as litearm's ``Arm(q_tol=...)``.
             dq_tol: Arrival tolerance on joint velocity (rad/s).
             arrive_frames: Consecutive frames that must satisfy both tolerances
                 before a motion counts as arrived.
@@ -448,14 +448,14 @@ class PyBulletArm:
         self._port: Optional[str] = None
 
         # One cartesian motion at a time: concurrent cartesian calls queue here,
-        # the way litearm-core serializes them on `_cart_serial`.  `_motion_gen`
+        # the way litearm-python serializes them on `_cart_serial`.  `_motion_gen`
         # is the supersede counter — starting any motion bumps it, so a motion
         # in flight stops pushing its waypoints, which is what the firmware does
         # when a joint move invalidates a cartesian plan.
         self._motion_serial = threading.Lock()
         self._motion_gen = 0
 
-        # Arrival criteria (litearm-core names and defaults)
+        # Arrival criteria (litearm-python names and defaults)
         self._q_tol = float(q_tol)
         self._dq_tol = float(dq_tol)
         self._arrive_frames = int(arrive_frames)
@@ -481,7 +481,7 @@ class PyBulletArm:
     def connect(self, port: Optional[str] = None) -> "PyBulletArm":
         """Start the simulation and return ``self`` (idempotent).
 
-        ``port`` exists for call-site parity with ``litearm_core.Arm``: a script
+        ``port`` exists for call-site parity with ``litearm.Arm``: a script
         written for the real arm passes the serial device here, and running that
         same script against the simulation must not need editing. There is no
         serial link to open, so the value is recorded (``self.port``) and
@@ -527,7 +527,7 @@ class PyBulletArm:
         self._closed = True
 
     def disconnect(self) -> None:
-        """Alias for :meth:`close`, the name litearm_core pairs with ``connect``.
+        """Alias for :meth:`close`, the name litearm pairs with ``connect``.
 
         One operation, two names, one implementation: the real SDK delegates
         ``disconnect()`` to ``close()`` for exactly this reason.
@@ -615,7 +615,7 @@ class PyBulletArm:
         """Latest robot state, wrapped in a :class:`Msg`.
 
         ``refresh`` forces a freshly built frame; ``timeout`` is accepted for
-        signature parity with ``litearm_core.Arm.get_state`` and is unused here
+        signature parity with ``litearm.Arm.get_state`` and is unused here
         — the simulation always has a state to read, so unlike the real arm
         this getter cannot come back empty (``Msg.value`` is never ``None``).
 
@@ -641,7 +641,7 @@ class PyBulletArm:
         return self.get_state(refresh=True, timeout=timeout)
 
     def _build_robot_state(self) -> RobotState:
-        """Snapshot the current PyBullet state as a litearm-core RobotState.
+        """Snapshot the current PyBullet state as a litearm-python RobotState.
 
         Caller holds ``self._lock``.
         """
@@ -701,7 +701,7 @@ class PyBulletArm:
         """TCP pose as ``Msg`` with ``value = (x, y, z, roll, pitch, yaw)``.
 
         Same six-number shape and ZYX-extrinsic-free convention as
-        ``litearm_core.Arm.get_tcp``. ``timeout`` is accepted for parity and
+        ``litearm.Arm.get_tcp``. ``timeout`` is accepted for parity and
         unused — the simulation always answers.
         """
         with self._lock:
@@ -711,7 +711,7 @@ class PyBulletArm:
         return self._msg(tuple(list(pos) + mat_to_rpy(R)), self._frames_tcp)
 
     def get_tcp_pose(self) -> Tuple[List[float], List[List[float]]]:
-        """Deprecated: use ``get_tcp()``, which is what litearm_core calls it.
+        """Deprecated: use ``get_tcp()``, which is what litearm calls it.
 
         Kept because the 0.1 API returned ``(position, rotation_matrix)`` and
         callers still want a matrix. The rotation is rebuilt from the same
@@ -723,7 +723,7 @@ class PyBulletArm:
 
     @property
     def n(self) -> int:
-        """Number of joints (litearm_core's name for it)."""
+        """Number of joints (litearm's name for it)."""
         return self._n_joints
 
     @property
@@ -740,7 +740,7 @@ class PyBulletArm:
     def fk(self, q: List[float]) -> Tuple[List[float], List[List[float]]]:
         """Forward kinematics: joint angles → (position, rotation_matrix).
 
-        Simulation-only: litearm_core has no FK for an arbitrary configuration
+        Simulation-only: litearm has no FK for an arbitrary configuration
         (the firmware only reports the TCP of the pose it is actually in).
         """
         return self._kinematics.fk(q)
@@ -753,7 +753,7 @@ class PyBulletArm:
     ) -> List[float]:
         """Inverse kinematics: ``pose`` → ``q[7]``; failure raises ``IKError``.
 
-        Accepts what ``litearm_core.Arm.ik`` accepts — ``[x, y, z, roll, pitch,
+        Accepts what ``litearm.Arm.ik`` accepts — ``[x, y, z, roll, pitch,
         yaw]`` — plus, because the simulation can be asked about a pose it is
         not standing in, the ``(position[3], R[3x3])`` and 4x4 forms
         :func:`as_pose` normalizes.
@@ -877,7 +877,7 @@ class PyBulletArm:
         """Move to the URDF zero configuration.
 
         ``timeout`` overrides ``move_timeout`` for this call and is keyword-only,
-        as in litearm_core — the older ``home(speed)`` spelling would silently
+        as in litearm — the older ``home(speed)`` spelling would silently
         feed a speed value to a timeout. There is likewise no ``speed``: the
         firmware hard-codes a low safety speed of 0.10, and the simulation uses
         the same one so the two take comparable time.
@@ -1317,7 +1317,7 @@ class PyBulletArm:
 
         The position loop is dropped and only gravity is compensated, which is
         what the firmware's ``0x06`` does. ``period`` is validated against the
-        same window as litearm-core and otherwise unused: the real SDK re-sends
+        same window as litearm-python and otherwise unused: the real SDK re-sends
         the command every ``period`` seconds to stay ahead of the firmware's
         0.10 s watchdog, and the simulation has no watchdog to stay ahead of.
 
@@ -1368,7 +1368,7 @@ class PyBulletArm:
     def _reject_in_zero_g(self) -> None:
         """Refuse an action command while zero gravity is held.
 
-        litearm_core puts this on the single write path every action command
+        litearm puts this on the single write path every action command
         goes through, because writing any of them rewrites the mode and kicks
         the watchdog the keepalive is fighting over. The simulation has no
         keepalive thread, but it keeps the refusal: scripts that lean on it
@@ -1381,7 +1381,7 @@ class PyBulletArm:
         stay reachable from every state.
 
         Checked before the individual argument validations rather than after
-        them, which is a step earlier than litearm_core's write-path guard. Both
+        them, which is a step earlier than litearm's write-path guard. Both
         orders raise ``InvalidCommandError``; only the message differs on a call
         that is wrong twice over, and here the state of the arm is the more
         fundamental thing to be told about.
@@ -1396,7 +1396,7 @@ class PyBulletArm:
         live ``cart_busy`` bit. Either alone can be mid-flip, so both are
         checked — the lock is taken without blocking, because "somebody is
         using the link" and "a plan is running" answer the same question here.
-        The message is litearm_core's ``CART_IN_FLIGHT_GUARD_MESSAGE`` word for
+        The message is litearm's ``CART_IN_FLIGHT_GUARD_MESSAGE`` word for
         word: refusing without naming a better stop action leaves the operator
         stuck, which is exactly why that text spells out ``movej()`` and
         ``emergency_stop()``.
@@ -1728,7 +1728,7 @@ class PyBulletArm:
     def enable(self, attempts: int = 12) -> None:
         """Enable motors and hold the current pose.
 
-        ``attempts`` is accepted for signature parity with litearm_core, where it
+        ``attempts`` is accepted for signature parity with litearm, where it
         retries the firmware's "retryable" enable errors (code 0x03 — "feedback
         not ready", the normal first-enable path on real hardware). The
         simulation cannot fail to enable, so it never retries and never sleeps:
@@ -1780,7 +1780,7 @@ class PyBulletArm:
     def clear_faults(self) -> None:
         """Clear latched motor faults.
 
-        Returns ``None``, like ``litearm_core.Arm.clear_faults`` — the previous
+        Returns ``None``, like ``litearm.Arm.clear_faults`` — the previous
         signature returned a list of ``(index, code)`` pairs, which invited
         ``if arm.clear_faults():`` and read as failure when nothing was wrong.
         The simulation raises no faults, so there is nothing to report; the
@@ -1840,7 +1840,7 @@ class PyBulletArm:
     def set_payload(
         self, mass: float, com: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     ) -> None:
-        """Accepted for call-site parity with litearm-core, and nothing more.
+        """Accepted for call-site parity with litearm-python, and nothing more.
 
         On the real arm this writes the tool mass and its centre of mass into
         the firmware's gravity feed-forward. The simulation takes gravity from
@@ -1993,7 +1993,7 @@ class PyBulletArm:
         into the simulation, so the arm on screen follows the physical one.
 
         Args:
-            real_arm: A ``litearm_core.Arm`` (anything answering
+            real_arm: A ``litearm.Arm`` (anything answering
                 ``get_state(refresh=True)`` with a ``Msg`` whose ``value.q`` is
                 the joint vector).
             rate_hz: How often to poll. Every frame is a serial round trip — the
@@ -2005,12 +2005,12 @@ class PyBulletArm:
         same pose forever is exactly the failure you cannot see.
 
         Do not send commands to ``real_arm`` yourself while mirroring: the two
-        readers steal each other's frames (litearm-core counts that as
+        readers steal each other's frames (litearm-python counts that as
         ``_foreign``). Call :meth:`stop_mirroring` first.
 
         Usage::
 
-            import litearm_core as pa
+            import litearm as pa
             real = pa.Arm(port="/dev/ttyACM0").connect()
             sim = PyBulletArm(render=True)
             sim.connect()
@@ -2112,7 +2112,7 @@ class PyBulletArm:
 class _ZeroGSession:
     """The handle ``PyBulletArm.zero_g()`` returns, usable as a context manager.
 
-    Same shape as litearm-core's ``_ZeroGSession``: entering the block yields
+    Same shape as litearm-python's ``_ZeroGSession``: entering the block yields
     the arm, leaving it stops zero gravity. Leaving it may also report why the
     session was lost, but never in a way that hides an exception from the block
     body — an error raised inside the ``with`` is the one worth seeing.

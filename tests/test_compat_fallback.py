@@ -1,4 +1,4 @@
-"""Tests for the litearm-core compatibility layer (_compat + _fallback).
+"""Tests for the litearm-python compatibility layer (_compat + _fallback).
 
 These run in both environments — with the real SDK installed and without.  The
 point of `_compat` is that the two are interchangeable, so every assertion below
@@ -20,18 +20,18 @@ from litearm_pybullet import _compat, _fallback
 # ── The decision point ────────────────────────────────────────────────────────
 
 def test_decision_point_is_self_consistent():
-    """HAS_LITEARM_CORE must agree with what _compat actually hands out."""
-    assert isinstance(_compat.HAS_LITEARM_CORE, bool)
-    if _compat.HAS_LITEARM_CORE:
+    """HAS_LITEARM must agree with what _compat actually hands out."""
+    assert isinstance(_compat.HAS_LITEARM, bool)
+    if _compat.HAS_LITEARM:
         assert _compat.SDK_IMPORT_ERROR is None
-        assert _compat.litearm_core is not None
-        assert _compat.Arm is _compat.litearm_core.Arm
+        assert _compat.litearm is not None
+        assert _compat.Arm is _compat.litearm.Arm
         # The real classes, not the local copies.
         assert _compat.Msg is not _fallback.Msg
         assert _compat.MotionTimeoutError is not _fallback.MotionTimeoutError
     else:
         assert _compat.SDK_IMPORT_ERROR is not None
-        assert _compat.litearm_core is None
+        assert _compat.litearm is None
         assert _compat.Arm is None
         assert _compat.Msg is _fallback.Msg
         assert _compat.RobotState is _fallback.RobotState

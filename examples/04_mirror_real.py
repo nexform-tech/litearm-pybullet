@@ -4,8 +4,8 @@
 
 前提:
   1. 机械臂已通过 USB 接上（CDC 串口）
-  2. 客户端已装 litearm-core（未上 PyPI，从源码装）:
-       pip install -e ../litearm-core
+  2. 客户端已装 litearm-python（未上 PyPI，从源码装）:
+       pip install -e ../litearm-python
 
 运行:
   python3 examples/04_mirror_real.py                 # 自动找 CDC 串口
@@ -14,7 +14,7 @@
 import argparse
 import time
 
-import litearm_core as pa
+import litearm as pa
 
 from litearm_pybullet import PyBulletArm
 
@@ -27,7 +27,7 @@ def main():
                     help="镜像轮询频率 (每帧都要过一次串口, 别调太高)")
     args = ap.parse_args()
 
-    # 连接真实机械臂。litearm-core 直连固件，没有 server/endpoint 这一层
+    # 连接真实机械臂。litearm-python 直连固件，没有 server/endpoint 这一层
     real = pa.Arm(port=args.port).connect()
     print(f"[实臂] 已连接 · port={args.port or '(自动查找)'} "
           f"firmware={real.firmware} n={real.n}")

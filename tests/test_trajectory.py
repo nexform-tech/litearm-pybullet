@@ -1,6 +1,6 @@
 """Tests for the recorded-trajectory types and their record/replay path.
 
-``JointTrajectory``/``TrajectoryFrame`` are simulation-only (litearm-core has no
+``JointTrajectory``/``TrajectoryFrame`` are simulation-only (litearm-python has no
 equivalent), and they are the on-disk format users hand between runs — so the
 round trip through a file is a contract, not an implementation detail.
 """

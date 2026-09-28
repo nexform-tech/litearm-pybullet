@@ -6,6 +6,7 @@ import numpy as np
 
 from litearm_pybullet import PyBulletArm
 from litearm_pybullet._compat import (
+    CartPlan,
     IKError,
     InvalidCommandError,
     Msg,
@@ -132,29 +133,181 @@ def test_ik(arm):
 
 
 def test_movej(arm):
-    """Test movej blocking motion."""
+    """movej returns the state it arrived in, not a bool."""
     import time
     time.sleep(0.1)
-    ok = arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
-    assert ok
-    state = arm.get_state().value
-    q = np.array(state.q)
-    target = np.array([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0])
-    err = np.max(np.abs(q - target))
-    assert err < 0.05, f"movej did not reach target: err={err}"
+    target = [0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0]
+    st = arm.movej(target, speed=0.5)
+    assert isinstance(st, RobotState)
+    # The returned frame is the arrival frame: already within tolerance.
+    err = np.max(np.abs(np.array(st.q) - np.array(target)))
+    assert err < arm._q_tol, f"movej reported arrival at err={err}"
+    assert np.max(np.abs(st.dq)) < arm._dq_tol
+    # ... and the live state agrees.
+    err_live = np.max(np.abs(np.array(arm.get_state().value.q) - np.array(target)))
+    assert err_live < 0.05, f"movej did not reach target: err={err_live}"
 
 
-def test_movel(arm):
-    """Test movel Cartesian line motion."""
+def test_movej_sync(arm):
+    """movej_sync lands every axis on the same step."""
+    target = [0.0, 0.5, 0.0, -1.0, 0.0, 0.6, 0.0]
+    st = arm.movej_sync(target, speed=0.5)
+    assert isinstance(st, RobotState)
+    assert np.max(np.abs(np.array(st.q) - np.array(target))) < arm._q_tol
+
+
+def test_movej_validates_speed_and_arity(arm):
+    """speed is a 0..1 fraction; out of range and wrong arity both raise."""
+    with pytest.raises(InvalidCommandError):
+        arm.movej([0.0] * 7, speed=1.5)
+    with pytest.raises(InvalidCommandError):
+        arm.movej([0.0] * 7, speed=-0.1)
+    with pytest.raises(InvalidCommandError):
+        arm.movej([0.0] * 6)
+    # speed=0.0 is legal input (0..1 inclusive) and means "don't move".
+    with pytest.raises(InvalidCommandError):
+        arm.movej_sync([0.0] * 7, speed=2.0)
+
+
+def test_move_l(arm):
+    """move_l follows a straight line and reports the plan."""
     import time
     time.sleep(0.1)
-    # Move to a known pose first
     arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
 
     pos, R = arm.get_tcp_pose()
     target = [pos[0], pos[1], pos[2] - 0.05]
-    ok = arm.movel([target, R], speed=0.2)
-    assert ok
+    plan = arm.move_l([target, R], speed=0.5)
+    assert isinstance(plan, CartPlan)
+    assert plan.ok is True
+    assert plan.n_wp > 0
+    assert plan.plan_us >= 0
+    assert plan.started_busy is True
+    assert plan.settled is True
+    assert len(plan.q_final) == 7
+    assert plan.settle_err_rad < arm._q_tol
+    # It really went there.
+    tcp = arm.get_tcp().value
+    assert tcp[2] == pytest.approx(target[2], abs=0.005)
+
+
+def test_move_l_no_wait(arm):
+    """wait=False reports "did not wait", not "did not arrive"."""
+    arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
+    pos, R = arm.get_tcp_pose()
+    plan = arm.move_l([pos[0], pos[1], pos[2] - 0.03] + mat_to_rpy(R), wait=False)
+    assert plan.ok is True
+    assert plan.settled is False
+    assert plan.started_busy is False
+    assert plan.q_final == []
+    assert plan.settle_err_rad == 0.0
+    # The arm keeps moving after the call returns. Reading it takes
+    # refresh=True: like the real SDK, a plain get_state() hands back the last
+    # frame *you* read, which here predates this motion.
+    assert arm.get_status_now().value.cart_busy is True
+    arm._motion_serial.acquire()   # waits for the background play to finish
+    assert arm.get_status_now().value.cart_busy is False
+
+
+def test_move_p(arm):
+    """move_p is a joint-space point-to-point judged on the TCP."""
+    import time
+    time.sleep(0.1)
+    arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
+
+    pos, R = arm.get_tcp_pose()
+    # Same attitude, 4 cm down. The sim's local IK leaves a few millimetres of
+    # residual, so the arrival tolerance is opened up to cover it — the test is
+    # about move_p's arrival criterion, not about the solver's limits.
+    goal = [pos[0], pos[1], pos[2] - 0.04] + mat_to_rpy(R)
+    st = arm.move_p(goal, speed=0.5, pos_tol=0.01, rpy_tol=0.05)
+    assert isinstance(st, RobotState)
+    tcp = arm.get_tcp().value
+    assert tcp[0] == pytest.approx(goal[0], abs=0.01)
+    assert tcp[2] == pytest.approx(goal[2], abs=0.01)
+
+
+def test_move_p_reports_an_impossible_tolerance_before_moving(arm):
+    """A tolerance the solver cannot meet is an IKError, not a 15 s timeout."""
+    pos, R = arm.get_tcp_pose()
+    goal = [pos[0], pos[1], pos[2] - 0.02] + mat_to_rpy(R)
+    with pytest.raises(IKError, match="可达精度"):
+        arm.move_p(goal, pos_tol=1e-4)
+
+
+def test_move_p_rejects_pose_sequences(arm):
+    """A sequence of poses is move_path's job, and says so."""
+    pos, R = arm.get_tcp_pose()
+    with pytest.raises(InvalidCommandError, match="move_path"):
+        arm.move_p([[pos[0], pos[1], pos[2], 0.0, 0.0, 0.0]] * 2)
+
+
+def test_move_c_checks_the_declared_start(arm):
+    """move_c starts from the measured TCP, so a wrong start must raise."""
+    import time
+    time.sleep(0.1)
+    arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
+
+    tcp = arm.get_tcp().value
+    via = [tcp[0] + 0.02, tcp[1], tcp[2] - 0.04, 0.0, 0.0, 0.0]
+    goal = [tcp[0] + 0.04, tcp[1], tcp[2], 0.0, 0.0, 0.0]
+
+    with pytest.raises(InvalidCommandError, match="pose_start"):
+        arm.move_c([tcp[0] + 0.5, tcp[1], tcp[2], 0.0, 0.0, 0.0], via, goal)
+
+    plan = arm.move_c(tcp, via, goal, speed=0.5)
+    assert plan.ok is True
+    assert plan.settled is True
+
+
+def test_move_path_limits_and_corners(arm):
+    """move_path rejects an empty path and more waypoints than the firmware takes."""
+    pos, _ = arm.get_tcp_pose()
+    with pytest.raises(InvalidCommandError, match="路径为空"):
+        arm.move_path([])
+    with pytest.raises(InvalidCommandError, match="32"):
+        arm.move_path([[pos[0], pos[1], pos[2], 0.0, 0.0, 0.0]] * 33)
+
+
+def test_deprecated_motion_aliases(arm):
+    """The old spellings still work, and still mean the same thing."""
+    import time
+    time.sleep(0.1)
+    arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
+    pos, R = arm.get_tcp_pose()
+    rpy = mat_to_rpy(R)
+
+    def pose(dz):
+        return [pos[0], pos[1], pos[2] + dz] + rpy
+
+    with pytest.deprecated_call():
+        plan = arm.movel([pose(-0.02)[:3], R], speed=0.5)
+    assert isinstance(plan, CartPlan)
+    assert plan.ok is True
+
+    with pytest.deprecated_call():
+        plan = arm.movec(pose(-0.03), pose(-0.02), speed=0.5)
+    assert plan.ok is True
+
+    with pytest.deprecated_call():
+        plan = arm.movep([pose(-0.015), pose(-0.01)], speed=0.5)
+    assert plan.ok is True
+
+    # Deprecated spellings are pure forwards — no second implementation that
+    # can drift away from the new one.
+    with pytest.deprecated_call():
+        old = arm.movel(pose(-0.02), speed=0.3)
+    new = arm.move_l(pose(-0.02), speed=0.3)
+    assert (old.ok, old.n_wp, old.settled) == (new.ok, new.n_wp, new.settled)
+
+
+def test_home(arm):
+    """home() returns to the zero configuration, keyword-only timeout."""
+    import time
+    time.sleep(0.1)
+    arm.movej([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0], speed=0.5)
+    st = arm.home()
+    assert np.max(np.abs(np.array(st.q))) < arm._q_tol
 
 
 def test_plan_movel(arm):

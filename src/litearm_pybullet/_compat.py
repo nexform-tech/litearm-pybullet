@@ -28,6 +28,7 @@ __all__ = [
     "CommandRejectedError", "UnsupportedByFirmwareError", "CartesianPlanError",
     "MotionSupersededError", "CartReplyLostError", "ArmIsInDfuError",
     "MODE_NAMES", "FLAG_NAMES", "FLAG_ENABLED_BIT", "MAX_JOINTS",
+    "CART_START_POS_TOL", "CART_START_RPY_TOL",
     "as_pose", "rpy_to_mat", "mat_to_rpy", "is_rotation",
 ]
 
@@ -50,6 +51,10 @@ try:  # pragma: no cover - exercised on both branches across environments
     from litearm_core._rot import as_pose, is_rotation, mat_to_rpy, rpy_to_mat
     from litearm_core.arm import Msg
     from litearm_core.cart import CartPlan
+    from litearm_core.cart import (
+        CART_START_POS_TOL as CART_START_POS_TOL,
+        CART_START_RPY_TOL as CART_START_RPY_TOL,
+    )
     from litearm_core.errors import (  # noqa: F401
         ArmIsInDfuError,
         CartesianPlanError,
@@ -70,6 +75,8 @@ try:  # pragma: no cover - exercised on both branches across environments
 except ImportError as _exc:
     SDK_IMPORT_ERROR = _exc
     from ._fallback import (  # noqa: F401
+        CART_START_POS_TOL,
+        CART_START_RPY_TOL,
         ArmIsInDfuError,
         CartesianPlanError,
         CartReplyLostError,

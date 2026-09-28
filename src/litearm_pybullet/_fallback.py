@@ -27,6 +27,7 @@ __all__ = [
     "CommandRejectedError", "UnsupportedByFirmwareError", "CartesianPlanError",
     "MotionSupersededError", "CartReplyLostError", "ArmIsInDfuError",
     "MODE_NAMES", "FLAG_NAMES", "FLAG_ENABLED_BIT", "MAX_JOINTS",
+    "CART_START_POS_TOL", "CART_START_RPY_TOL",
     "as_pose", "rpy_to_mat", "mat_to_rpy", "is_rotation",
 ]
 
@@ -45,6 +46,14 @@ FLAG_NAMES = {0: "FAULT", 1: "WD_TRIPPED", 2: "FB_STALE",
 FLAG_ENABLED_BIT = 9
 #: Upper bound on joints representable in the joint_fault bitmap.
 MAX_JOINTS = 16
+
+#: How close a cartesian command's declared start must be to the measured TCP
+#: before it is accepted.  Same numbers, same meaning as litearm-core's
+#: ``cart.CART_START_POS_TOL`` / ``CART_START_RPY_TOL``: the firmware's arc
+#: always starts from the *measured* TCP, so a mismatched ``pose_start`` would
+#: silently command a different arc than the caller described.
+CART_START_POS_TOL = 0.006
+CART_START_RPY_TOL = 0.03
 
 
 # ── State types ───────────────────────────────────────────────────────────────

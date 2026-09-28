@@ -25,10 +25,12 @@ their docstrings: ``fk`` for an arbitrary configuration, ``plan_*``,
 """
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import threading
 import time
+import warnings
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple, Union
@@ -37,11 +39,17 @@ import numpy as np
 import pybullet as p
 
 from ._compat import (
+    CART_START_POS_TOL,
+    CART_START_RPY_TOL,
     FLAG_ENABLED_BIT,
     MODE_NAMES,
+    CartesianPlanError,
+    CartPlan,
     IKError,
     InvalidCommandError,
     JointState,
+    MotionTimeoutError,
+    MotorFaultError,
     Msg,
     RobotState,
     as_pose,
@@ -118,6 +126,96 @@ class _FrameStats:
 
     def timestamp(self) -> float:
         return self._ts[-1] if self._ts else 0.0
+
+
+#: Playback cadence for geometrically spaced cartesian paths, in seconds per
+#: waypoint at ``speed=1.0``. A cartesian plan carries no timing (the firmware's
+#: planner produces it), so unlike a joint trajectory — whose waypoints are
+#: already dt-spaced with `speed` folded in — this path needs a rate of its own.
+#: 20 ms/waypoint is the cadence the previous movel/movec/movep implementation
+#: used, so cartesian tracking behaves as before.
+_CART_WAYPOINT_INTERVAL = 0.02
+
+#: Trajectory generation cannot divide by a zero speed, and `speed=0.0` is legal
+#: input (0..1 inclusive) meaning "don't move". Clamping the *generation* rate
+#: keeps that from becoming a ZeroDivisionError: the arm simply never arrives,
+#: and the caller gets MotionTimeoutError, which is the honest outcome.
+_SPEED_FLOOR = 1e-3
+
+#: `home()` takes no speed — the firmware hard-codes 0.10 (a low safety speed,
+#: since homing is done by whoever is standing next to the arm, usually right
+#: after a fault). The simulation moves at the same rate so a script that times
+#: the two gets comparable numbers.
+_HOME_SPEED = 0.10
+
+
+def _orient_angle(rpy_a: Sequence[float], rpy_b: Sequence[float]) -> float:
+    """Geodesic angle between two orientations, in radians."""
+    Ra = np.asarray(rpy_to_mat(list(rpy_a)), dtype=float)
+    Rb = np.asarray(rpy_to_mat(list(rpy_b)), dtype=float)
+    c = float(np.trace(Ra.T @ Rb))
+    return math.acos(max(-1.0, min(1.0, (c - 1.0) / 2.0)))
+
+
+def _pose6_near(tcp: Sequence[float], goal: Sequence[float],
+                pos_tol: float, rpy_tol: float) -> bool:
+    """Is ``tcp`` at ``goal``, both ``[x, y, z, roll, pitch, yaw]``?
+
+    Position is compared component-wise. Orientation is component-wise *or* by
+    geodesic angle: ``mat_to_rpy`` forces ``yaw = 0`` at gimbal lock, so the same
+    rotation can report two very different rpy triples, and a component-wise-only
+    test would never accept the pose it is standing in.
+    """
+    if max(abs(tcp[i] - goal[i]) for i in range(3)) >= pos_tol:
+        return False
+    if max(abs(tcp[i] - goal[i]) for i in range(3, 6)) < rpy_tol:
+        return True
+    return _orient_angle(tcp[3:6], goal[3:6]) < rpy_tol
+
+
+def _is_single_pose(x: Any) -> bool:
+    """Is this one pose, or a sequence of poses?
+
+    ``[pose1, pose2]`` and ``(pos[3], R[3x3])`` are both "length 2, two
+    sequences", so length alone would misjudge a legitimate position/rotation
+    pair as a sequence — and ``move_p`` must reject sequences by name.
+    """
+    if not isinstance(x, (list, tuple)) or isinstance(x, (str, bytes)):
+        return False
+    n = len(x)
+    if n == 4 and all(isinstance(r, (list, tuple)) and len(r) == 4 for r in x):
+        return True
+    if n == 6 and not any(isinstance(v, (list, tuple)) for v in x):
+        return True
+    if n == 2 and all(isinstance(v, (list, tuple)) for v in x):
+        p, R = list(x[0]), list(x[1])
+        return (len(p) == 3 and len(R) == 3
+                and all(isinstance(r, (list, tuple)) and len(r) == 3 for r in R))
+    return False
+
+
+def _as_pose6(pose: Any, label: str) -> List[float]:
+    """Normalize a pose argument to ``[x, y, z, roll, pitch, yaw]``.
+
+    Shape errors come from :func:`as_pose` with the offending shape in the
+    message; the label says which argument of which entry point. Malformed
+    *values* (``float("x")``) and wrong container types are folded into
+    ``InvalidCommandError`` too — a caller branching on ``LiteArmError`` should
+    not miss the "I passed a string" case just because it failed during
+    conversion rather than shape checking.
+    """
+    try:
+        pos, R = as_pose(pose)
+    except InvalidCommandError as exc:
+        raise InvalidCommandError(f"{label}: {exc}") from None
+    except (ValueError, TypeError) as exc:
+        raise InvalidCommandError(f"{label}: {exc}") from None
+    return [float(v) for v in pos] + list(mat_to_rpy(R))
+
+
+def _warn_deprecated(old: str, new: str) -> None:
+    warnings.warn(f"{old}() is deprecated, use {new}() instead",
+                  DeprecationWarning, stacklevel=3)
 
 
 def _resolve_model_path(model_path: Optional[str] = None) -> str:
@@ -295,6 +393,14 @@ class PyBulletArm:
         self._cart_busy = False
         self._seq = 0
         self._last_tau = np.zeros(n_joints)
+
+        # One cartesian motion at a time: concurrent cartesian calls queue here,
+        # the way litearm-core serializes them on `_cart_serial`.  `_motion_gen`
+        # is the supersede counter — starting any motion bumps it, so a motion
+        # in flight stops pushing its waypoints, which is what the firmware does
+        # when a joint move invalidates a cartesian plan.
+        self._motion_serial = threading.Lock()
+        self._motion_gen = 0
 
         # Arrival criteria (litearm-core names and defaults)
         self._q_tol = float(q_tol)
@@ -598,47 +704,424 @@ class PyBulletArm:
         """Plan a multi-waypoint Cartesian path."""
         return self._kinematics.plan_movep(q_start, poses_goal)
 
-    # ── Motion Control (blocking) ──────────────────────────────────────────────
+    # ── Joint Motion ───────────────────────────────────────────────────────────
 
-    def movej(
-        self,
-        q_target: List[float],
-        speed: float = 1.0,
-        settle_s: float = 1.0,
-        max_cycles: Optional[int] = None,
-        allow_start_collision_recovery: bool = False,
-        **kwargs: Any,
-    ) -> bool:
-        """Move to joint target (blocking)."""
+    def movej(self, q: Sequence[float], speed: float = 1.0) -> RobotState:
+        """Joint move to ``q``; each axis runs its own profile and stops when it
+        gets there, so the intermediate TCP path is not predictable.
+
+        ``speed`` is a 0..1 fraction of the trajectory rate (not a percentage —
+        see ``set_speed`` for the global percent governor). Blocks until the
+        joints have been within ``q_tol``/``dq_tol`` for ``arrive_frames``
+        consecutive frames, then returns the state it arrived in; raises
+        ``MotionTimeoutError`` if that never happens and ``MotorFaultError`` if
+        the arm faults or stops first.
+        """
+        return self._move_joint(q, speed, label="movej", sync=False)
+
+    def movej_sync(self, q: Sequence[float], speed: float = 1.0) -> RobotState:
+        """Joint move to ``q`` with every axis arriving on the same step.
+
+        The difference from :meth:`movej` is the trajectory *shape*: one scalar
+        ``s: 0 -> 1`` drives all axes along the joint-space line, so the TCP
+        stays on a predictable path a caller can validate. Paying for that is
+        being held to the slowest axis — this is slower than ``movej``, which is
+        why it is a separate mode rather than a replacement.
+        """
+        return self._move_joint(q, speed, label="movej_sync", sync=True)
+
+    def move_p(self, pose: Any, speed: float = 1.0,
+               pos_tol: float = 0.006, rpy_tol: float = 0.03) -> RobotState:
+        """Point-to-point move to a single pose, ending when the *TCP* is there.
+
+        Joint-space interpolation, not a straight line: the intermediate TCP
+        path is whatever the joint interpolation produces. For a straight line,
+        an arc or a waypoint list use :meth:`move_l` / :meth:`move_c` /
+        :meth:`move_path`.
+
+        Accepts one pose — ``[x, y, z, roll, pitch, yaw]``, ``(pos[3], R[3x3])``
+        or a 4x4 matrix. A sequence of poses raises ``InvalidCommandError``
+        naming :meth:`move_path`, because the two are not interchangeable.
+
+        ``pos_tol``/``rpy_tol`` are the arrival criterion, same defaults and
+        meaning as on the real arm. One simulation-only difference: the sim's
+        local solver leaves a residual of a few millimetres, so a tolerance
+        tighter than it can manage is reported as ``IKError`` *before* moving
+        instead of after ``move_timeout`` — "this solver cannot stand there" is
+        a different fact from "the arm did not get there".
+        """
+        self._check_speed(speed, "move_p")
+        if not _is_single_pose(pose):
+            raise InvalidCommandError(
+                "move_p 只收单个位姿；多个位姿请用 move_path（注意语义不同："
+                "move_p 是关节空间点到点，move_path 是笛卡尔多路点）")
+        goal = _as_pose6(pose, "move_p")
+        q_goal = self.ik(goal)
+        self._require_reachable_within(q_goal, goal, pos_tol, rpy_tol)
+
         self._ensure_running()
-        q_target = np.asarray(q_target, dtype=float)[:self._n_joints]
+        with self._lock:
+            q0 = _read_joint_state(self._body, self._joints, self._cid)[0]
+        path = self._traj_gen.linear_trajectory(
+            q0, np.asarray(q_goal, dtype=float), speed=max(speed, _SPEED_FLOOR))
+
+        self._mode = _MODE_MOVE_P
+        try:
+            self._play(path, self._dt)
+            return self._arrive_pose(goal, pos_tol, rpy_tol)
+        finally:
+            self._mode = _MODE_INIT
+
+    def home(self, *, timeout: Optional[float] = None) -> RobotState:
+        """Move to the URDF zero configuration.
+
+        ``timeout`` overrides ``move_timeout`` for this call and is keyword-only,
+        as in litearm_core — the older ``home(speed)`` spelling would silently
+        feed a speed value to a timeout. There is likewise no ``speed``: the
+        firmware hard-codes a low safety speed of 0.10, and the simulation uses
+        the same one so the two take comparable time.
+        """
+        return self._move_joint([0.0] * self._n_joints, _HOME_SPEED,
+                                label="home", timeout=timeout)
+
+    # ── Cartesian Motion ───────────────────────────────────────────────────────
+
+    def move_l(self, pose: Any, speed: float = 1.0, wait: bool = True) -> CartPlan:
+        """Straight cartesian line to ``pose`` (attitude slerped along the way).
+
+        ``pose`` is the goal; the start is the measured TCP, not an argument.
+
+        ``wait=True`` plays the path and waits for the arm to stop on it, after
+        which ``settled``/``q_final``/``settle_err_rad`` are filled in.
+        ``wait=False`` returns as soon as the path is being played, leaving
+        those four fields at their "did not wait" defaults — that is *not* the
+        same as "did not arrive"; read ``get_state()`` if you need to know where
+        the arm is.
+
+        ``ok=True`` only means the path was planned and started. A motion
+        superseded by another (a ``movej`` from anywhere, for instance) comes
+        back ``ok=True, settled=False`` rather than raising.
+        """
+        goal = _as_pose6(pose, "move_l")
+        return self._cartesian_start("move_l", [goal], speed, wait)
+
+    def move_c(self, pose_start: Any, pose_via: Any, pose_goal: Any,
+               speed: float = 1.0, wait: bool = True) -> CartPlan:
+        """Circular arc through ``pose_via`` and ``pose_goal``.
+
+        The arc's start is always the *measured* TCP, so ``pose_start`` must
+        match it (``CART_START_POS_TOL`` / ``CART_START_RPY_TOL``) or the call
+        raises ``InvalidCommandError`` — accepting a different start would
+        command an arc the caller never described. ``pose_via`` contributes its
+        position only; the attitude slerps from start to goal.
+        """
+        start = _as_pose6(pose_start, "move_c pose_start")
+        via = _as_pose6(pose_via, "move_c pose_via")
+        goal = _as_pose6(pose_goal, "move_c pose_goal")
+
+        tcp = self.get_tcp().value
+        if not _pose6_near(tcp, start, CART_START_POS_TOL, CART_START_RPY_TOL):
+            raise InvalidCommandError(
+                f"move_c: pose_start 与当前 TCP 不一致 —— 起点恒为实测 TCP, "
+                f"给的 start={['%.4f' % v for v in start]}, "
+                f"实际 tcp={['%.4f' % v for v in tcp]}")
+        return self._cartesian_start("move_c", [via, goal], speed, wait)
+
+    def move_path(self, poses: Sequence[Any], speed: float = 1.0,
+                  wait: bool = True) -> CartPlan:
+        """Visit every pose in ``poses`` in order, with sharp corners.
+
+        The path is a polyline through the waypoints — the planner has no
+        blending field in the protocol, so it does not round corners. The
+        arrival check compares against the *last* waypoint: intermediate
+        waypoints are passed, not stopped at.
+        """
+        pts = [_as_pose6(p, "move_path") for p in poses]
+        if not pts:
+            raise InvalidCommandError("move_path: 路径为空")
+        if len(pts) > 32:
+            raise InvalidCommandError(
+                f"move_path: 路点数 {len(pts)} 超固件上限 32 (CART_MAX_GOAL)")
+        return self._cartesian_start("move_path", pts, speed, wait)
+
+    # ── Motion internals ───────────────────────────────────────────────────────
+
+    def _move_joint(self, q: Sequence[float], speed: float, label: str,
+                    sync: bool = False,
+                    timeout: Optional[float] = None) -> RobotState:
+        """Generate a joint trajectory, play it, and wait for arrival."""
+        sp = self._check_speed(speed, label)
+        q_target = [float(v) for v in q]
+        if len(q_target) != self._n_joints:
+            raise InvalidCommandError(
+                f"{label} 需要 {self._n_joints} 个关节角 (N={self._n_joints})")
+
+        self._ensure_running()
+        with self._lock:
+            q0 = _read_joint_state(self._body, self._joints, self._cid)[0]
+        gen_speed = max(sp, _SPEED_FLOOR)
+        q_target_arr = np.asarray(q_target, dtype=float)
+        if sync:
+            # Same overall duration as the per-axis profile, but one scalar
+            # drives every axis, so they land together.
+            timing = self._traj_gen.linear_trajectory(q0, q_target_arr, speed=gen_speed)
+            path = self._traj_gen.minimum_jerk_trajectory(
+                q0, q_target_arr, len(timing) * self._dt)
+        else:
+            path = self._traj_gen.linear_trajectory(q0, q_target_arr, speed=gen_speed)
+
+        self._mode = _MODE_MOVE_J
+        try:
+            self._play(path, self._dt)
+            return self._arrive(q_target, timeout=timeout)
+        finally:
+            self._mode = _MODE_INIT
+
+    def _cartesian_start(self, label: str, poses: List[List[float]],
+                         speed: float, wait: bool) -> CartPlan:
+        """Plan, then play (and optionally wait on) a cartesian path."""
+        sp = self._check_speed(speed, label)
+        self._ensure_running()
 
         with self._lock:
-            q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
+            q0 = _read_joint_state(self._body, self._joints, self._cid)[0].tolist()
 
-        traj = self._traj_gen.linear_trajectory(q_current, q_target, speed=speed)
-        traj_duration = len(traj) * self._dt / speed
+        # The SDK speaks 6-vectors; the sim's planners speak (pos, R). Convert
+        # on the way in so both ends keep their own convention.
+        pairs = [([p[0], p[1], p[2]], rpy_to_mat(p[3:])) for p in poses]
 
-        self._controller.set_target(q_target)
+        t_plan = time.perf_counter()
+        if label == "move_l":
+            path = self._plan_checked(self._kinematics.plan_movel, q0, poses[0],
+                                      pairs[0], label=label)
+        elif label == "move_c":
+            path = self._plan_checked(self._kinematics.plan_movec, q0, poses[1],
+                                      pairs[0], pairs[1], label=label)
+        else:
+            path = self._plan_checked(self._kinematics.plan_movep, q0, poses[-1],
+                                      pairs, label=label)
+        plan_us = int((time.perf_counter() - t_plan) * 1e6)
+        if not path:
+            raise CartesianPlanError(f"{label}: 规划为空")
 
-        total_wait = traj_duration + settle_s
-        settle_start = time.time()
-        while time.time() - settle_start < total_wait:
-            self._control_sleep_with_abort(self._dt)
+        interval = self._rate_interval(_CART_WAYPOINT_INTERVAL, sp)
+        plan = CartPlan(ok=True, err=0, n_wp=len(path), plan_us=plan_us)
+
+        # Serialize cartesian motions (concurrent calls queue, as the SDK
+        # documents) and take the supersede token.
+        self._motion_serial.acquire()
+        gen = self._new_generation()
+        self._cart_busy = True
+        if wait:
+            try:
+                played = self._play(path, interval, gen=gen)
+                plan.started_busy = True
+                if played:
+                    st = self._arrive(np.asarray(path[-1], dtype=float))
+                    plan.settled = True
+                    plan.q_final = list(st.q)
+                    plan.settle_err_rad = float(np.max(
+                        np.abs(np.asarray(st.q) - np.asarray(path[-1], dtype=float))))
+                else:
+                    # Superseded mid-path: the trajectory was invalidated, so
+                    # report where the arm actually ended up.  Not an error —
+                    # this is the SDK's documented ok=True / settled=False case.
+                    plan.q_final = list(self.get_state().value.q)
+            finally:
+                self._cart_busy = False
+                self._motion_serial.release()
+        else:
+            self._play_async(path, interval, gen)
+        return plan
+
+    def _plan_checked(self, planner: Callable[..., List[List[float]]],
+                      q_start: List[float], goal6: Sequence[float],
+                      *args: Any, label: str) -> List[List[float]]:
+        """Plan a cartesian path, rejecting one that cannot be executed.
+
+        The sim's planners return whatever the IK produced and say nothing about
+        whether it reaches the goal, so an unreachable target would otherwise
+        come back as a plausible-looking path. ``args`` are the poses in the
+        sim planners' ``(pos, R)`` form; ``goal6`` is the final waypoint as a
+        6-vector, used for the arrival check.
+        """
+        try:
+            path = planner(q_start, *args)
+        except (ValueError, TypeError) as exc:
+            raise InvalidCommandError(f"{label}: 规划失败: {exc}") from None
+        if not path:
+            raise CartesianPlanError(f"{label}: 规划为空 (目标不可达?)")
+        # Each waypoint must be a valid configuration for the arm.
+        arr = np.asarray(path, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] != len(q_start) or not np.all(np.isfinite(arr)):
+            raise CartesianPlanError(f"{label}: 规划结果非法 (形状/数值)")
+        # The last waypoint must actually be at the goal: verify the IK landed
+        # somewhere real instead of trusting the planner's silence.
+        pos, R = self._fk_list(arr[-1].tolist())
+        got = list(pos) + list(mat_to_rpy(R))
+        if not _pose6_near(got, goal6, _IK_POS_TOL, _IK_ROT_TOL):
+            raise CartesianPlanError(
+                f"{label}: 末端到不了目标 (残差 "
+                f"{max(abs(got[i] - goal6[i]) for i in range(3)) * 1000:.1f} mm)")
+        return [row.tolist() for row in arr]
+
+    def _fk_list(self, q: List[float]) -> Tuple[List[float], List[List[float]]]:
+        with self._lock:
+            return self._kinematics.fk(q)
+
+    @staticmethod
+    def _rate_interval(base_interval: float, speed: float) -> float:
+        """Per-waypoint interval for a geometrically spaced path at ``speed``."""
+        return base_interval / max(speed, _SPEED_FLOOR)
+
+    @staticmethod
+    def _check_speed(speed: Any, label: str) -> float:
+        """``speed`` is a 0..1 fraction. Out of range raises, never clamps."""
+        try:
+            sp = float(speed)
+        except (TypeError, ValueError):
+            raise InvalidCommandError(
+                f"{label}: speed 需 0..1 (给的是 {speed!r})") from None
+        if not 0.0 <= sp <= 1.0:
+            raise InvalidCommandError(f"{label}: speed 需 0..1 (给的是 {speed})")
+        return sp
+
+    def _new_generation(self) -> int:
+        """Start a new motion, superseding whatever was in flight."""
+        self._motion_gen += 1
+        return self._motion_gen
+
+    def _play(self, q_path: Sequence[Sequence[float]], interval: float,
+              gen: Optional[int] = None) -> bool:
+        """Push a joint path to the controller, one waypoint per ``interval``.
+
+        Returns ``False`` if another motion superseded this one (the firmware
+        invalidates a cartesian plan the moment a joint command arrives);
+        ``True`` if the path was played out. Latched stops are left for the
+        caller's arrival check to report.
+        """
+        self._ensure_running()
+        if gen is None:
+            gen = self._new_generation()
+        t0 = time.monotonic()
+        for i, q_des in enumerate(q_path):
+            delay = (t0 + i * interval) - time.monotonic()
+            if delay > 0:
+                self._control_sleep_with_abort(delay)
             if self._stopped:
+                return True
+            if self._motion_gen != gen:
                 return False
-
+            with self._lock:
+                self._controller.set_target(np.asarray(q_des, dtype=float))
         return True
+
+    def _play_async(self, q_path: Sequence[Sequence[float]], interval: float,
+                    gen: int) -> None:
+        """Play a path in the background (``wait=False``).
+
+        The background thread owns the cartesian slot until it finishes, so a
+        second cartesian call queues behind it exactly as it would on the arm.
+        """
+        def _run() -> None:
+            try:
+                self._play(q_path, interval, gen=gen)
+            finally:
+                self._cart_busy = False
+                self._motion_serial.release()
+
+        threading.Thread(target=_run, daemon=True, name="pybullet_cart").start()
+
+    def _arrive(self, target: Sequence[float],
+                timeout: Optional[float] = None) -> RobotState:
+        """Wait until the joints sit on ``target`` for ``arrive_frames`` frames."""
+        budget = self._move_timeout if timeout is None else float(timeout)
+        deadline = time.monotonic() + budget
+        tgt = [float(v) for v in target]
+        n_ok = 0
+        while True:
+            st = self.get_state(refresh=True).value
+            if st.faulted:
+                raise MotorFaultError(f"未到位即故障: mode={st.mode_name}")
+            if len(st.q) == len(tgt):
+                near = all(abs(st.q[i] - tgt[i]) < self._q_tol
+                           for i in range(len(tgt)))
+                slow = all(abs(d) < self._dq_tol for d in st.dq)
+                n_ok = n_ok + 1 if (near and slow) else 0
+                if n_ok >= self._arrive_frames:
+                    return st
+            else:
+                n_ok = 0
+            if time.monotonic() > deadline:
+                raise MotionTimeoutError(f"未到位, 超时 {budget}s")
+            self._control_sleep_with_abort(self._dt)
+
+    def _require_reachable_within(self, q_goal: Sequence[float],
+                                  goal: Sequence[float], pos_tol: float,
+                                  rpy_tol: float) -> None:
+        """Fail early when the solver cannot stand within ``pos_tol`` of ``goal``.
+
+        The firmware plans ``move_p`` with its own IK, so a target it cannot
+        reach ends in ``MotionTimeoutError`` there. The sim knows the answer
+        before it moves; waiting out ``move_timeout`` first would report a
+        solver limit as a motion failure.
+        """
+        pos, R = self._fk_list(list(q_goal))
+        got = list(pos) + list(mat_to_rpy(R))
+        pos_err = float(np.linalg.norm(np.asarray(got[:3]) - np.asarray(goal[:3])))
+        if pos_err > pos_tol or _orient_angle(got[3:], goal[3:]) > rpy_tol:
+            raise IKError(
+                f"move_p: 该位姿的可达精度 {pos_err * 1000:.1f} mm 达不到要求的 "
+                f"{pos_tol * 1000:.1f} mm (仿真 IK 残差); 放宽 pos_tol/rpy_tol "
+                f"或换一个位姿")
+
+    def _arrive_pose(self, goal: Sequence[float], pos_tol: float,
+                     rpy_tol: float) -> RobotState:
+        """Wait until the measured TCP is at ``goal`` (``move_p``'s criterion).
+
+        The arm is judged by where its TCP is, not by how close its joints came
+        to the IK solution — that is what ``move_p`` means on the real arm.
+        """
+        deadline = time.monotonic() + self._move_timeout
+        while True:
+            st = self.get_state(refresh=True).value
+            if st.faulted:
+                raise MotorFaultError(f"未到位即故障: mode={st.mode_name}")
+            tcp = self.get_tcp().value
+            if tcp is not None and _pose6_near(tcp, goal, pos_tol, rpy_tol):
+                return st
+            if time.monotonic() > deadline:
+                raise MotionTimeoutError(
+                    f"move_p 未到目标位姿, 超时 {self._move_timeout}s")
+            self._control_sleep_with_abort(0.02)
+
+    # ── Deprecated motion spellings ────────────────────────────────────────────
+
+    def movel(self, pose_goal: Any, speed: float = 1.0, **kwargs: Any) -> CartPlan:
+        """Deprecated: use :meth:`move_l`."""
+        _warn_deprecated("movel", "move_l")
+        return self.move_l(pose_goal, speed=speed, **kwargs)
+
+    def movec(self, pose_via: Any, pose_goal: Any, speed: float = 1.0,
+              **kwargs: Any) -> CartPlan:
+        """Deprecated: use :meth:`move_c` (the start is filled in for you)."""
+        _warn_deprecated("movec", "move_c")
+        return self.move_c(self.get_tcp().value, pose_via, pose_goal,
+                           speed=speed, **kwargs)
+
+    def movep(self, poses_goal: Sequence[Any], speed: float = 1.0,
+              **kwargs: Any) -> CartPlan:
+        """Deprecated: use :meth:`move_path`."""
+        _warn_deprecated("movep", "move_path")
+        return self.move_path(poses_goal, speed=speed, **kwargs)
 
     def recover_joint_limits(
         self,
         speed: float = 0.05,
-        settle_s: float = 0.5,
-        max_cycles: Optional[int] = None,
         inset_rad: float = 0.0,
         **kwargs: Any,
-    ) -> bool:
-        """Slowly return out-of-limit joints to safe boundaries."""
+    ) -> RobotState:
+        """Simulation-only: walk out-of-limit joints back to safe boundaries."""
         self._ensure_running()
         with self._lock:
             q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
@@ -651,135 +1134,34 @@ class PyBulletArm:
                 q_safe[j] = np.clip(q_safe[j], lo, hi)
 
         if np.allclose(q_current, q_safe):
-            return True
-
-        return self.movej(q_safe.tolist(), speed=speed, settle_s=settle_s)
-
-    def movel(
-        self,
-        pose_goal: Any,
-        speed: float = 1.0,
-        settle_s: float = 0.8,
-        max_cycles: Optional[int] = None,
-        **kwargs: Any,
-    ) -> bool:
-        """Move in a straight Cartesian line (blocking)."""
-        self._ensure_running()
-
-        pos_goal, R_goal = pose_goal
-        pos_goal = np.asarray(pos_goal, dtype=float)
-        R_goal = np.asarray(R_goal, dtype=float)
-
-        with self._lock:
-            q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
-
-        path = self._kinematics.plan_movel(q_current.tolist(), (pos_goal, R_goal), num_waypoints=50)
-
-        for q_des in path:
-            self._control_sleep_with_abort(self._dt * 10)
-            self._controller.set_target(np.asarray(q_des))
-            if self._stopped:
-                return False
-
-        self._controller.set_target(np.asarray(path[-1]))
-        settle_start = time.time()
-        while time.time() - settle_start < settle_s:
-            self._control_sleep_with_abort(self._dt)
-            if self._stopped:
-                return False
-
-        return True
-
-    def movec(
-        self,
-        pose_via: Any,
-        pose_goal: Any,
-        speed: float = 1.0,
-        settle_s: float = 0.8,
-        max_cycles: Optional[int] = None,
-        **kwargs: Any,
-    ) -> bool:
-        """Move in a circular arc through via-point (blocking)."""
-        self._ensure_running()
-
-        with self._lock:
-            q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
-
-        path = self._kinematics.plan_movec(q_current.tolist(), pose_via, pose_goal)
-
-        for q_des in path:
-            self._control_sleep_with_abort(self._dt * 10)
-            self._controller.set_target(np.asarray(q_des))
-            if self._stopped:
-                return False
-
-        settle_start = time.time()
-        while time.time() - settle_start < settle_s:
-            self._control_sleep_with_abort(self._dt)
-            if self._stopped:
-                return False
-
-        return True
-
-    def movep(
-        self,
-        poses_goal: List[Any],
-        speed: float = 1.0,
-        settle_s: float = 0.8,
-        max_cycles: Optional[int] = None,
-        **kwargs: Any,
-    ) -> bool:
-        """Move through multiple Cartesian waypoints (blocking)."""
-        self._ensure_running()
-
-        with self._lock:
-            q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
-
-        path = self._kinematics.plan_movep(q_current.tolist(), poses_goal)
-
-        for q_des in path:
-            self._control_sleep_with_abort(self._dt * 10)
-            self._controller.set_target(np.asarray(q_des))
-            if self._stopped:
-                return False
-
-        settle_start = time.time()
-        while time.time() - settle_start < settle_s:
-            self._control_sleep_with_abort(self._dt)
-            if self._stopped:
-                return False
-
-        return True
+            return self.get_state().value
+        return self._move_joint(q_safe.tolist(), speed, label="recover_joint_limits")
 
     def replay_joint_path(
         self,
         q_path: List[List[float]],
         speed: float = 1.0,
-        settle_s: float = 0.5,
         goto_start: bool = True,
         goto_speed: float = 0.3,
         max_cycles: Optional[int] = None,
         **kwargs: Any,
-    ) -> bool:
-        """Replay a sequence of joint configurations."""
-        self._ensure_running()
+    ) -> RobotState:
+        """Simulation-only: replay a sequence of joint configurations.
 
-        if goto_start and len(q_path) > 0:
+        Played at ``dt/speed`` per waypoint and then waited on, so the returned
+        state is where the arm ended up (raising rather than returning False if
+        it never got there).
+        """
+        self._ensure_running()
+        if not q_path:
+            return self.get_state().value
+
+        if goto_start:
             self.movej(q_path[0], speed=goto_speed)
 
-        for q_des in q_path:
-            self._control_sleep_with_abort(self._dt / speed)
-            self._controller.set_target(np.asarray(q_des))
-            if self._stopped:
-                return False
-
-        settle_start = time.time()
-        while time.time() - settle_start < settle_s:
-            self._control_sleep_with_abort(self._dt)
-            if self._stopped:
-                return False
-
-        return True
+        interval = self._rate_interval(self._dt, self._check_speed(speed, "replay_joint_path"))
+        self._play(q_path, interval)
+        return self._arrive(q_path[-1])
 
     def replay_trajectory(
         self,
@@ -790,8 +1172,8 @@ class PyBulletArm:
         max_cycles: Optional[int] = None,
         check_singularity: bool = True,
         **kwargs: Any,
-    ) -> bool:
-        """Replay a JointTrajectory or path."""
+    ) -> RobotState:
+        """Simulation-only: replay a JointTrajectory, dict, or joint path."""
         self._ensure_running()
 
         if hasattr(traj_q, 'q'):
@@ -806,7 +1188,7 @@ class PyBulletArm:
             q_path = traj_q
 
         return self.replay_joint_path(
-            q_path, speed=speed, settle_s=0.5,
+            q_path, speed=speed,
             goto_start=goto_start, goto_speed=goto_speed,
         )
 
@@ -820,26 +1202,31 @@ class PyBulletArm:
         simplify_tolerance_rad: float = 0.01,
         max_cycles: Optional[int] = None,
         **kwargs: Any,
-    ) -> bool:
-        """Replay a measured trajectory on its recorded time axis."""
+    ) -> RobotState:
+        """Simulation-only: replay a measured trajectory on its recorded clock."""
         self._ensure_running()
+        sp = self._check_speed(speed, "replay_timed_trajectory")
+        if not traj_q:
+            return self.get_state().value
 
-        if goto_start and len(traj_q) > 0:
+        if goto_start:
             self.movej(traj_q[0], speed=goto_speed)
 
         if len(traj_t) < 2:
-            return self.replay_joint_path(traj_q, speed=speed)
+            return self.replay_joint_path(traj_q, speed=sp)
 
-        t0 = traj_t[0]
+        gen = self._new_generation()
+        t_prev = traj_t[0]
         for q_des, t in zip(traj_q, traj_t):
-            dt = (t - t0) / speed
-            t0 = t
-            self._control_sleep_with_abort(max(dt, self._dt))
-            self._controller.set_target(np.asarray(q_des))
-            if self._stopped:
-                return False
+            gap = (t - t_prev) / max(sp, _SPEED_FLOOR)
+            t_prev = t
+            self._control_sleep_with_abort(max(gap, self._dt))
+            if self._stopped or self._motion_gen != gen:
+                break
+            with self._lock:
+                self._controller.set_target(np.asarray(q_des, dtype=float))
 
-        return True
+        return self._arrive(traj_q[-1])
 
     def play_trajectory(
         self,
@@ -851,15 +1238,9 @@ class PyBulletArm:
         simplify_tolerance_rad: float = 0.01,
         max_cycles: Optional[int] = None,
         **kwargs: Any,
-    ) -> bool:
-        """Load and replay a saved trajectory."""
-        try:
-            from ._litearm.types import JointTrajectory
-        except ImportError:
-            raise ImportError(
-                "play_trajectory with file path requires litearm-pybullet[mirror] dependencies. "
-                "Install with: pip install litearm-pybullet[mirror]"
-            )
+    ) -> RobotState:
+        """Simulation-only: load and replay a saved trajectory."""
+        from ._litearm.types import JointTrajectory
 
         if isinstance(trajectory, str):
             traj = JointTrajectory.load(trajectory)
@@ -927,29 +1308,13 @@ class PyBulletArm:
         kp_scale: float = 3.0,
         max_cycles: Optional[int] = None,
         **kwargs: Any,
-    ) -> bool:
-        """Hold current position with increased stiffness."""
+    ) -> RobotState:
+        """Simulation-only: hold the current position (no motion commanded)."""
         self._ensure_running()
         with self._lock:
             q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
-        self._controller.set_target(q_current)
-        return True
-
-    def zero_gravity(
-        self,
-        max_cycles: Optional[int] = None,
-        duration_s: Optional[float] = None,
-        measured_overspeed_factor: Optional[float] = None,
-        vel_max: Optional[List[float]] = None,
-        **kwargs: Any,
-    ) -> bool:
-        """Enable zero-gravity (free-drag) mode."""
-        self._ensure_running()
-        self._enabled = False
-        if duration_s is not None:
-            time.sleep(duration_s)
-            self._enabled = True
-        return True
+            self._controller.set_target(q_current)
+        return self.get_state().value
 
     def joint_impedance(
         self,
@@ -960,11 +1325,9 @@ class PyBulletArm:
         engage_sec: float = 0.3,
         max_cycles: Optional[int] = None,
         **kwargs: Any,
-    ) -> bool:
-        """Joint-space impedance control (simplified)."""
-        self._ensure_running()
-        self._controller.set_target(np.asarray(q_des, dtype=float)[:self._n_joints])
-        return True
+    ) -> RobotState:
+        """Simulation-only: joint-space impedance (a stiff hold at ``q_des``)."""
+        return self.joint_follow(q_des=q_des, K=K, B=B)
 
     def cartesian_impedance(
         self,
@@ -980,11 +1343,9 @@ class PyBulletArm:
         measured_overspeed_factor: Optional[float] = None,
         vel_max: Optional[List[float]] = None,
         **kwargs: Any,
-    ) -> bool:
-        """Cartesian-space impedance control (simplified)."""
-        self._ensure_running()
-        self._controller.set_target(np.asarray(q_des, dtype=float)[:self._n_joints])
-        return True
+    ) -> RobotState:
+        """Simulation-only: cartesian impedance (reduced to a joint hold)."""
+        return self.joint_follow(q_des=q_des, K=K_cart, B=B_cart)
 
     def joint_follow(
         self,
@@ -995,11 +1356,22 @@ class PyBulletArm:
         engage_sec: float = 0.3,
         max_cycles: Optional[int] = None,
         duration_s: Optional[float] = None,
+        q_des: Optional[List[float]] = None,
         **kwargs: Any,
-    ) -> bool:
-        """Follow an external target provider."""
+    ) -> RobotState:
+        """Simulation-only: follow a driver.
+
+        There is no external driver in the simulation, so this only establishes
+        the target ``q_des`` (the current pose when not given) and returns the
+        state. Update the target with ``set_joint_positions`` to drive it.
+        """
         self._ensure_running()
-        return True
+        with self._lock:
+            q_now, _ = _read_joint_state(self._body, self._joints, self._cid)
+            q_target = q_now if q_des is None else np.asarray(
+                q_des, dtype=float)[:self._n_joints]
+            self._controller.set_target(q_target)
+        return self.get_state().value
 
     # ── Emergency Stop ─────────────────────────────────────────────────────────
 
@@ -1018,13 +1390,20 @@ class PyBulletArm:
 
     # ── Enable / Disable ───────────────────────────────────────────────────────
 
-    def enable(self) -> None:
-        """Enable motors and hold current pose."""
+    def enable(self, attempts: int = 12) -> None:
+        """Enable motors and hold the current pose.
+
+        ``attempts`` is accepted for signature parity with litearm_core, where it
+        retries the firmware's "retryable" enable errors. The simulation cannot
+        fail to enable, so it never retries — the parameter is described rather
+        than silently ignored.
+        """
         self._enabled = True
         self._stopped = False
+        self._mode = _MODE_INIT
         with self._lock:
             q_current, _ = _read_joint_state(self._body, self._joints, self._cid)
-        self._controller.set_target(q_current)
+            self._controller.set_target(q_current)
 
     def disable(self) -> None:
         """Disable motors (arm will drop under gravity)."""

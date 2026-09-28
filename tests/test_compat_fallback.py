@@ -282,6 +282,12 @@ def test_as_pose_error_names_the_shape():
 
 # ── Protocol tables ───────────────────────────────────────────────────────────
 
+def test_cart_start_tolerances():
+    """move_c's start check: the numbers are part of the contract, not a knob."""
+    assert _compat.CART_START_POS_TOL == 0.006
+    assert _compat.CART_START_RPY_TOL == 0.03
+
+
 def test_mode_and_flag_tables():
     assert _compat.MODE_NAMES[0] == "INIT"
     assert _compat.MODE_NAMES[6] == "EMERGENCY"

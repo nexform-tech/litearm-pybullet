@@ -6,8 +6,8 @@
 
 前提:
   1. 机械臂已通过 USB 接上（CDC 串口）
-  2. 客户端已装 litearm-core（未上 PyPI，从源码装）:
-       pip install -e ../litearm-core
+  2. 客户端已装 litearm-python（未上 PyPI，从源码装）:
+       pip install -e ../litearm-python
 
 运行:
   python3 examples/05_dual_control.py

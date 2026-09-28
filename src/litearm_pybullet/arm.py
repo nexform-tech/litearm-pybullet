@@ -1838,8 +1838,16 @@ class PyBulletArm:
 
     def set_payload(
         self, mass: float, com: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-    ) -> Dict:
-        return {"mass": mass, "com": list(com)}
+    ) -> None:
+        """Accepted for call-site parity with litearm-core, and nothing more.
+
+        On the real arm this writes the tool mass and its centre of mass into
+        the firmware's gravity feed-forward. The simulation takes gravity from
+        the URDF through PyBullet's inverse dynamics, so there is no such
+        parameter to set and this changes nothing — the same call, the same
+        return, and no effect, rather than a return value that implies one.
+        """
+        return None
 
     def get_payload(self) -> Dict:
         return {"mass": 0.0, "com": [0.0, 0.0, 0.0]}

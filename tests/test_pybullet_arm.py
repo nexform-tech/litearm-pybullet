@@ -381,6 +381,17 @@ def test_park_and_set_motion_mode(arm):
         arm.set_motion_mode(256)
 
 
+def test_set_payload_returns_none_like_the_sdk(arm):
+    """Same signature and same (absent) return as litearm_core.Arm.set_payload.
+
+    It has no effect here — the simulation takes gravity from the URDF — but a
+    ported script must not trip over the call itself, or over a return value
+    that looks like a reading of something.
+    """
+    assert arm.set_payload(2.5) is None
+    assert arm.set_payload(2.5, com=(0.0, 0.0, 0.05)) is None
+
+
 def test_set_speed_governs_every_motion(arm):
     """set_speed is a global percentage, and it scales the rate motions run at."""
     assert arm._governed(1.0) == pytest.approx(1.0)

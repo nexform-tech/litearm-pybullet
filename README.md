@@ -236,6 +236,11 @@ pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
+A dev container carries the whole environment — Python, PyBullet, the test
+tooling, and a browser view of the simulation window. With VS Code and the Dev
+Containers extension: F1 → **Dev Containers: Reopen in Container**. See
+[.devcontainer/README.md](.devcontainer/README.md) for the details.
+
 ## License
 
 Proprietary

@@ -1,0 +1,41 @@
+{
+    "name": "litearm-pybullet simulation",
+    "build": {
+        "context": "..",
+        "dockerfile": ".devcontainer/Dockerfile",
+        "cacheFrom": "ghcr.io/nexform-tech/litearm-pybullet-dev:latest"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/github-cli:1": {}
+    },
+    "postCreateCommand": "pip install --user --no-deps -e \"${containerWorkspaceFolder}\"",
+    "postStartCommand": "/bin/bash ${containerWorkspaceFolder}/.devcontainer/start-vnc.sh",
+    "containerEnv": {
+        "DISPLAY": ":1"
+    },
+    "forwardPorts": [6080],
+    "portsAttributes": {
+        "6080": {
+            "label": "Simulation display (noVNC)",
+            "onAutoForward": "notify"
+        }
+    },
+    "runArgs": ["--shm-size=1g"],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "github.vscode-github-actions",
+                "ms-azuretools.vscode-docker"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/python/current/bin/python",
+                "python.testing.pytestEnabled": true,
+                "python.testing.pytestArgs": ["tests"]
+            }
+        }
+    },
+    "remoteUser": "vscode"
+}

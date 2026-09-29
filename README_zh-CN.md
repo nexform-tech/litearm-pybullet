@@ -233,6 +233,10 @@ pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
+仓库自带 dev container，预装 Python、PyBullet、测试工具，并带仿真窗口的浏览器
+视图。在 VS Code 安装 Dev Containers 扩展后：F1 → **Dev Containers: Reopen in
+Container**。详见 [.devcontainer/README.md](.devcontainer/README.md)。
+
 ## License
 
 Proprietary

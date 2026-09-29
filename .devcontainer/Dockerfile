@@ -11,7 +11,12 @@ FROM mcr.microsoft.com/devcontainers/python:1-3.11-bookworm
 # PyBullet's OpenGL window needs Mesa (software rendering via llvmpipe) and the
 # X11 client libraries. xvfb + x11vnc + novnc/websockify serve that window to a
 # browser; x11-utils provides xdpyinfo, used by start-vnc.sh.
-RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
+#
+# The base image ships a yarn apt repository without its signing key, which
+# makes `apt-get update` fail (NO_PUBKEY 62D54FD4003F6525). This image does not
+# use yarn, so drop the repo before updating.
+RUN rm -f /etc/apt/sources.list.d/*yarn* \
+    && apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get install -y --no-install-recommends \
         libgl1 libgl1-mesa-dri libegl1 libglib2.0-0 \
         libx11-6 libxext6 libxrender1 libxrandr2 libxi6 \

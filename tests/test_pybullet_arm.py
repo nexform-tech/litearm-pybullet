@@ -50,7 +50,7 @@ def test_init_and_close(arm):
 
 
 def test_get_state(arm):
-    """get_state returns a Msg envelope around a litearm_core RobotState."""
+    """get_state returns a Msg envelope around a litearm RobotState."""
     import time
     time.sleep(0.1)
     msg = arm.get_state()
@@ -370,7 +370,7 @@ def test_stop_aliases_are_deprecated_forwards(arm):
 
 
 def test_clear_faults_returns_none(arm):
-    """clear_faults returns None (litearm-core's signature), not a list."""
+    """clear_faults returns None (litearm-python's signature), not a list."""
     assert arm.clear_faults() is None
     arm.emergency_stop()
     arm.clear_faults()
@@ -389,7 +389,7 @@ def test_park_and_set_motion_mode(arm):
 
 
 def test_set_payload_returns_none_like_the_sdk(arm):
-    """Same signature and same (absent) return as litearm_core.Arm.set_payload.
+    """Same signature and same (absent) return as litearm.Arm.set_payload.
 
     It has no effect here — the simulation takes gravity from the URDF — but a
     ported script must not trip over the call itself, or over a return value
@@ -442,7 +442,7 @@ def test_enable_disable(arm):
 
 
 def test_enable_attempts_is_accepted(arm):
-    """`attempts` is litearm-core's retry count; the simulation never needs one."""
+    """`attempts` is litearm-python's retry count; the simulation never needs one."""
     assert arm.enable(attempts=3) is None
     assert arm.get_status_now().value.enabled is True
 
@@ -468,7 +468,7 @@ def test_start_is_a_forward_to_connect(arm):
 
 
 def test_disconnect_is_close(arm):
-    """disconnect() is the litearm-core name for the same teardown."""
+    """disconnect() is the litearm-python name for the same teardown."""
     assert arm.disconnect() is None
     assert arm._sim_running is False
     arm.disconnect()                        # idempotent

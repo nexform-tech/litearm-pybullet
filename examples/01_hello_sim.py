@@ -22,7 +22,7 @@ def main():
     try:
         time.sleep(1.0)
 
-        # litearm-core 2.0 起，"读一帧"的接口都返回 Msg 信封，值在 .value
+        # litearm-python 2.0 起，"读一帧"的接口都返回 Msg 信封，值在 .value
         msg = arm.get_state()
         state = msg.value
         print("\n[仿真状态]")

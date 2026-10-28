@@ -1,20 +1,20 @@
-"""The litearm-core API contract, written where it can fail.
+"""The litearm-python API contract, written where it can fail.
 
 Three things are pinned here:
 
-1. The 31 names ``PyBulletArm`` shares with ``litearm_core.Arm`` — name,
+1. The 31 names ``PyBulletArm`` shares with ``litearm.Arm`` — name,
    parameter names, defaults — as a literal table.  A signature change on
    either side has to be a deliberate edit to this file.
 2. The names the simulation is *supposed* to add (58 simulation-only, 8 legacy
    aliases), so the public surface cannot grow or shrink by accident.  The
    README's three tiers and the counts in the developer guide come from these
    same numbers.
-3. Against the real SDK, when it is installed: that ``litearm_core.Arm`` still
+3. Against the real SDK, when it is installed: that ``litearm.Arm`` still
    matches the table, that the fallback's dataclasses have the same fields in
    the same order, that the fallback's error classes mirror the SDK's, and
    that the re-exported constant tables are the SDK's own.
 
-With ``litearm-core`` absent only the fallback half runs — which is the point,
+With ``litearm-python`` absent only the fallback half runs — which is the point,
 since the fallback is what ships to people who have no arm yet.
 """
 from __future__ import annotations
@@ -24,18 +24,18 @@ import inspect
 
 import pytest
 
-from litearm_pybullet import HAS_LITEARM_CORE, PyBulletArm, _compat, _fallback
+from litearm_pybullet import HAS_LITEARM, PyBulletArm, _compat, _fallback
 
-if HAS_LITEARM_CORE:
+if HAS_LITEARM:
     try:
-        from litearm_core import _protocol as _sdk_protocol
+        from litearm import _protocol as _sdk_protocol
     except ImportError:  # pragma: no cover - SDK internals moved
         _sdk_protocol = None
 else:
     _sdk_protocol = None
 
 requires_sdk = pytest.mark.skipif(
-    not HAS_LITEARM_CORE, reason="litearm-core is not installed"
+    not HAS_LITEARM, reason="litearm-python is not installed"
 )
 
 
@@ -76,7 +76,7 @@ SHARED_API = {
     "zero_g_stop": "(raise_on_lost=False)",
 }
 
-#: Everything the simulation adds that litearm-core has no counterpart for.
+#: Everything the simulation adds that litearm-python has no counterpart for.
 #: Documentation calls these "simulation-only"; there are 58.
 SIM_ONLY = (
     "cartesian_impedance", "connect_device", "delete_trajectory", "device",
@@ -104,15 +104,17 @@ LEGACY = (
     "zero_gravity", "start",
 )
 
-#: On ``litearm_core.Arm``, deliberately absent here: entering DFU, reading the
-#: firmware's own log, tuning feed-forward, the model/param dumps.  The
+#: On ``litearm.Arm``, deliberately absent here: entering DFU, reading the
+#: firmware's own log, tuning feed-forward, the model/param dumps, and the
+#: licence activation that only a real arm has anything to license.  The
 #: simulation must not pretend to have them.
 SDK_ONLY = (
-    "FF_SCALAR_ITEMS", "FF_SCALAR_RO_ITEMS", "FF_VEC_ITEMS", "diag",
-    "enter_dfu", "ff_preset", "get_ff_mask", "get_ff_scalar", "get_ff_vec",
-    "last_reset_reason", "log", "model", "params", "poll_cart", "reconnect",
-    "save_params", "set_ff_mask", "set_ff_scalar", "set_ff_vec",
-    "set_gravity_scale", "set_gravity_vector", "set_inertia_scale",
+    "FF_SCALAR_ITEMS", "FF_SCALAR_RO_ITEMS", "FF_VEC_ITEMS", "activate",
+    "diag", "enter_dfu", "ff_preset", "get_ff_mask", "get_ff_scalar",
+    "get_ff_vec", "last_reset_reason", "license", "log", "model", "params",
+    "poll_cart", "reconnect", "save_params", "set_ff_mask", "set_ff_scalar",
+    "set_ff_vec", "set_gravity_scale", "set_gravity_vector",
+    "set_inertia_scale",
 )
 
 
@@ -185,16 +187,16 @@ def test_simulation_does_not_claim_sdk_only_names():
 
 @requires_sdk
 def test_real_sdk_still_matches_the_shared_table():
-    """If litearm-core changes a signature, this fails and the table is stale."""
+    """If litearm-python changes a signature, this fails and the table is stale."""
     for name, expected in SHARED_API.items():
-        assert hasattr(_compat.Arm, name), f"litearm_core.Arm.{name} is gone"
+        assert hasattr(_compat.Arm, name), f"litearm.Arm.{name} is gone"
         assert _render_signature(_compat.Arm, name) == expected, name
 
 
 @requires_sdk
 def test_every_sdk_only_name_still_exists_on_the_real_sdk():
     for name in SDK_ONLY:
-        assert hasattr(_compat.Arm, name), f"litearm_core.Arm.{name} is gone"
+        assert hasattr(_compat.Arm, name), f"litearm.Arm.{name} is gone"
 
 
 @requires_sdk
@@ -212,7 +214,7 @@ def test_fallback_dataclasses_have_the_sdk_fields_in_order():
 @requires_sdk
 def test_fallback_errors_mirror_the_sdk_hierarchy():
     """Same classes, same inheritance — so one ``except`` covers both."""
-    from litearm_core import errors as sdk_errors
+    from litearm import errors as sdk_errors
 
     sdk_names = {
         n for n in dir(sdk_errors)
@@ -228,7 +230,7 @@ def test_fallback_errors_mirror_the_sdk_hierarchy():
 
 
 @requires_sdk
-@pytest.mark.skipif(_sdk_protocol is None, reason="litearm_core._protocol moved")
+@pytest.mark.skipif(_sdk_protocol is None, reason="litearm._protocol moved")
 def test_compat_reexports_the_sdk_constant_tables():
     """The mode/flag tables are the SDK's, not a local copy that drifted."""
     assert _compat.MODE_NAMES == _sdk_protocol.MODE_NAMES

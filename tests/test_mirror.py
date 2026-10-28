@@ -4,12 +4,12 @@ None of these need hardware or the real SDK: the real-arm half is a scripted
 stand-in that answers the same calls.  What is being tested is the *contract*
 around the real arm — that every mirror read is a fresh one, that commands are
 never interleaved with mirrored frames, that both arms are always told about a
-command, and that a missing litearm-core says so instead of half-working.
+command, and that a missing litearm-python says so instead of half-working.
 
 ``_compat.Arm`` is patched rather than the SDK: that module is the single place
 that decides which implementation is in play, so patching it is the same knob
 the package itself uses, and the tests then behave identically whether or not
-litearm-core is installed.
+litearm-python is installed.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def _await_q(sim, expected, timeout=2.5):
 
 
 class _FakeRealArm:
-    """The ``litearm_core.Arm`` subset the mirror code uses, scripted.
+    """The ``litearm.Arm`` subset the mirror code uses, scripted.
 
     Records every call and, for ``get_state``, every ``refresh`` value — the
     mirror is required to ask for a *fresh* frame, and a silent regression to
@@ -154,8 +154,8 @@ class _FakeRealArm:
 
 @pytest.fixture
 def fake_sdk(monkeypatch):
-    """Point ``_compat`` at the fake arm, as if litearm-core were installed."""
-    monkeypatch.setattr(_compat, "HAS_LITEARM_CORE", True)
+    """Point ``_compat`` at the fake arm, as if litearm-python were installed."""
+    monkeypatch.setattr(_compat, "HAS_LITEARM", True)
     monkeypatch.setattr(_compat, "Arm", _FakeRealArm)
     return _FakeRealArm
 
@@ -168,7 +168,7 @@ def make_fake(monkeypatch):
     ``fake.frame``, ``fake.q``) without reaching into ``DualArm``'s internals.
     """
     def _install(fake):
-        monkeypatch.setattr(_compat, "HAS_LITEARM_CORE", True)
+        monkeypatch.setattr(_compat, "HAS_LITEARM", True)
         monkeypatch.setattr(_compat, "Arm", lambda port=None, **kw: fake)
         return fake
     return _install
@@ -193,24 +193,24 @@ def dual(fake_sdk):
 # ── The install hint ──────────────────────────────────────────────────────────
 
 def test_dual_arm_without_sdk_says_how_to_get_it(monkeypatch):
-    """No litearm-core: refuse, name the package, and name how to install it.
+    """No litearm-python: refuse, name the package, and name how to install it.
 
     It is not on PyPI, so the usual `pip install <name>` would send the reader
     to a dead end — the message has to say where it actually comes from.
     """
-    monkeypatch.setattr(_compat, "HAS_LITEARM_CORE", False)
+    monkeypatch.setattr(_compat, "HAS_LITEARM", False)
     monkeypatch.setattr(_compat, "Arm", None)
     with pytest.raises(ImportError) as exc:
         DualArm(render=False)
-    assert "litearm-core" in str(exc.value)
+    assert "litearm-python" in str(exc.value)
     assert "pip install -e" in str(exc.value)
 
 
 def test_mirror_mode_without_sdk_says_how_to_get_it(monkeypatch, sim):
-    monkeypatch.setattr(_compat, "HAS_LITEARM_CORE", False)
+    monkeypatch.setattr(_compat, "HAS_LITEARM", False)
     with pytest.raises(ImportError) as exc:
         MirrorMode(_FakeRealArm(), sim)
-    assert "litearm-core" in str(exc.value)
+    assert "litearm-python" in str(exc.value)
 
 
 # ── DualArm construction ──────────────────────────────────────────────────────
@@ -646,9 +646,9 @@ def test_close_stops_mirroring_too(sim):
     assert sim.mirroring is False
 
 
-def test_mirror_from_needs_no_litearm_core(sim, monkeypatch):
+def test_mirror_from_needs_no_litearm(sim, monkeypatch):
     """A fake arm is enough — mirroring is plain duck typing, no SDK required."""
-    monkeypatch.setattr(_compat, "HAS_LITEARM_CORE", False)
+    monkeypatch.setattr(_compat, "HAS_LITEARM", False)
     sim.mirror_from(_FakeRealArm())
     try:
         assert sim.mirroring is True

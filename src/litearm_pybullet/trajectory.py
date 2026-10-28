@@ -5,7 +5,7 @@
 :meth:`PyBulletArm.play_trajectory` accepts — a joint path with timing, saved
 and loaded as JSON.
 
-Simulation-only: litearm-core has no equivalent. Its motion calls take a target
+Simulation-only: litearm-python has no equivalent. Its motion calls take a target
 and block until the arm arrives; a trajectory is only something you can record
 and replay here, since the simulation is the thing that can measure a path
 frame by frame without a real arm's firmware owning the timing.

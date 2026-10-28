@@ -1,7 +1,7 @@
 # litearm-pybullet Developer Guide
 
-> Based on litearm-pybullet v0.1.0, real-arm backend migrated to `litearm-core` 2.1.0.
-> If you are porting code written against the old Zenoh-based `litearm-python`, read
+> Based on litearm-pybullet v0.1.0, real-arm backend migrated to `litearm-python` 2.1.0.
+> If you are porting code written against the old Zenoh-based `litearm-python` 0.1.0, read
 > [Migrating from 0.1](#migrating-from-01-the-litearm-python-era) first.
 
 ## Project Structure
@@ -13,8 +13,8 @@ litearm-pybullet/
 ├── .gitignore
 ├── src/
 │   └── litearm_pybullet/
-│       ├── __init__.py         # Exports PyBulletArm, DualArm, MirrorMode, HAS_LITEARM_CORE
-│       ├── arm.py              # Core: PyBulletArm class (aligned with litearm_core.Arm)
+│       ├── __init__.py         # Exports PyBulletArm, DualArm, MirrorMode, HAS_LITEARM
+│       ├── arm.py              # Core: PyBulletArm class (aligned with litearm.Arm)
 │       ├── controller.py       # PID joint controller + trajectory generator
 │       ├── kinematics.py       # Forward/inverse kinematics (FK/IK) + path planning
 │       ├── mirror.py           # DualArm (dual control) + MirrorMode (mirroring)
@@ -49,7 +49,7 @@ litearm-pybullet/
 ┌──────────────────────────────────────────────────┐
 │                 Your Python Program               │
 │                                                    │
-│  arm = PyBulletArm(render=True)  ← swap for litearm_core.Arm │
+│  arm = PyBulletArm(render=True)  ← swap for litearm.Arm │
 │  arm.movej(...) / arm.get_state() / arm.close()    │
 └──────────┬──────────────────┬────────────────────┘
            │                  │
@@ -57,24 +57,24 @@ litearm-pybullet/
     │ Standalone   │    │ Mirror / Dual      │
     │             │    │                    │
     │ PyBullet    │    │ PyBullet +         │
-    │ Physics     │    │ litearm-core       │
+    │ Physics     │    │ litearm-python       │
     │ PID Ctrl    │    │ (USB CDC)          │
     └─────────────┘    └────────────────────┘
 ```
 
-There is no server tier: `litearm-core` speaks the firmware protocol directly over
+There is no server tier: `litearm-python` speaks the firmware protocol directly over
 USB CDC. There is no `endpoint`, no `arm_id`, and no Zenoh anywhere in the stack.
 
 ### Module Responsibilities
 
 | Module | Responsibility |
 |--------|---------------|
-| `arm.py` | Main class `PyBulletArm`, 31 methods aligned 1:1 with `litearm_core.Arm`, background thread running physics simulation |
+| `arm.py` | Main class `PyBulletArm`, 31 methods aligned 1:1 with `litearm.Arm`, background thread running physics simulation |
 | `controller.py` | `JointPIDController` position controller + `TrajectoryGenerator` trapezoidal velocity trajectory generation |
 | `kinematics.py` | `Kinematics` class: FK (forward kinematics), IK (damped least-squares with Levenberg-Marquardt refinement) + path planning (straight line / circular arc / multi-waypoint) |
 | `mirror.py` | `DualArm` (simultaneous control of real + sim), `MirrorMode` (sim tracks real arm) |
 | `_compat.py` | Decides where `Msg`/`RobotState`/`CartPlan`/exceptions/pose helpers come from — the real SDK if it imports, `_fallback.py` otherwise |
-| `_fallback.py` | Local structural equivalents, name- and field-aligned with `litearm_core` 2.1.0, pinned by `tests/test_api_parity.py` |
+| `_fallback.py` | Local structural equivalents, name- and field-aligned with `litearm` 2.1.0, pinned by `tests/test_api_parity.py` |
 | `litearm.urdf` | URDF model: 7 joints, real STL mesh geometry, torque motors |
 
 ### Data Flow
@@ -115,8 +115,8 @@ arm.movej(q_target, speed=0.5)
 ### 1. API Alignment
 
 `PyBulletArm` implements 31 methods with the same names, parameters, defaults, return
-types and exceptions as `litearm_core.Arm`. Users only need to replace
-`litearm_core.Arm(port=...)` with `PyBulletArm(render=True)` to run the same control
+types and exceptions as `litearm.Arm`. Users only need to replace
+`litearm.Arm(port=...)` with `PyBulletArm(render=True)` to run the same control
 code in simulation.
 
 ```
@@ -134,10 +134,10 @@ trajectory recording/playback, mirroring, impedance modes, the hand/device proxi
 the config/log/service accessors, `n`/`firmware`/`port`), and 7 names are
 **deprecated 0.1 aliases** that forward to a single new method each.
 
-Type identity is the point of `_compat.py`: if `litearm-core` is installed, the sim
+Type identity is the point of `_compat.py`: if `litearm-python` is installed, the sim
 imports *its* `Msg`, `RobotState`, `CartPlan` and exception classes, so
-`except litearm_core.MotionTimeoutError` catches a simulation failure too. Without it,
-`_fallback.py` provides structurally identical local copies. `litearm_pybullet.HAS_LITEARM_CORE`
+`except litearm.MotionTimeoutError` catches a simulation failure too. Without it,
+`_fallback.py` provides structurally identical local copies. `litearm_pybullet.HAS_LITEARM`
 tells you which happened.
 
 ### 2. Three Operating Modes
@@ -155,13 +155,13 @@ tells you which happened.
 - `get_state()` returns a snapshot of the state cache, does not block the simulation loop
 - Mirroring runs in its own daemon thread. It reads the real arm and writes joint
   positions; do not send commands to the same real arm object while it runs
-  (litearm-core counts the competing reader as a foreign frame). Call
+  (litearm-python counts the competing reader as a foreign frame). Call
   `stop_mirroring()` first.
 
 ### 4. Zero-Dependency Standalone Mode
 
 Standalone simulation mode requires only `pybullet>=3.2.5` and `numpy>=1.21`. Mirror/dual
-modes require the `litearm-pybullet[mirror]` extra, whose dependency on `litearm-core`
+modes require the `litearm-pybullet[mirror]` extra, whose dependency on `litearm-python`
 is optional and imported lazily — the sim never imports it unless you ask for mirroring.
 
 ## URDF Model (litearm.urdf)
@@ -203,9 +203,9 @@ Arrival is decided by four constructor arguments, all matching the SDK's names:
 
 ### Optional Dependencies (mirror/dual mode)
 
-- `litearm-core` — **not on PyPI.** The `[mirror]` extra names it, but that name does
+- `litearm-python` — **not on PyPI.** The `[mirror]` extra names it, but that name does
   not resolve against PyPI, so install from a source checkout:
-  `pip install -e ../litearm-core`
+  `pip install -e ../litearm-python`
 
 ### Installation
 
@@ -214,7 +214,7 @@ Arrival is decided by four constructor arguments, all matching the SDK's names:
 pip install litearm-pybullet
 
 # Mirror/dual mode (requires real-arm communication)
-pip install -e ../litearm-core     # first: not on PyPI
+pip install -e ../litearm-python     # first: not on PyPI
 pip install "litearm-pybullet[mirror]"
 ```
 
@@ -252,7 +252,7 @@ with PyBulletArm(render=True) as arm:
 
 Starts the background simulation thread and returns `self`. The simulation loop runs
 at 500 Hz (1/dt where dt=0.002). `port` is accepted for signature compatibility with
-`litearm_core.Arm(port=...)` and ignored — there is nothing to open. Idempotent:
+`litearm.Arm(port=...)` and ignored — there is nothing to open. Idempotent:
 calling it twice does no extra work.
 
 ```python
@@ -295,7 +295,7 @@ Methods that perform pure computation without stepping the simulation.
 #### fk(q)
 
 Forward kinematics: compute TCP pose from joint angles. **Simulation-only** —
-`litearm_core` has no FK for an arbitrary configuration, because the firmware only
+`litearm` has no FK for an arbitrary configuration, because the firmware only
 reports the TCP of the pose it is actually in.
 
 **Parameters:**
@@ -310,7 +310,7 @@ pos, R = arm.fk([0.0, 0.6, 0.0, -1.2, 0.0, 0.7, 0.0])
 
 #### ik(pose, q_seed=None, timeout=3.0)
 
-Inverse kinematics. Same signature as `litearm_core.Arm.ik`: takes a pose, returns
+Inverse kinematics. Same signature as `litearm.Arm.ik`: takes a pose, returns
 `q[7]`, and **raises `IKError`** when the pose is unreachable — there is no `ok` flag.
 Uses PyBullet's built-in IK as an initial seed, then refines with Levenberg-Marquardt.
 
@@ -333,7 +333,7 @@ q_sol = arm.ik([0.5, 0.0, 0.4, 0.0, 1.5708, 0.0])
 #### plan_movel(q_start, pose_goal)
 
 Plan a straight-line Cartesian path from a start configuration to a goal pose.
-**Simulation-only** (`litearm_core` plans internally, inside `move_l`).
+**Simulation-only** (`litearm` plans internally, inside `move_l`).
 
 **Parameters:**
 
@@ -601,7 +601,7 @@ Follow an external target provider (stub). Simulation-only.
 
 ### 4.3 State Reading
 
-All three readers return a `Msg` envelope, exactly as `litearm-core` 2.0+ does. The
+All three readers return a `Msg` envelope, exactly as `litearm-python` 2.0+ does. The
 payload is in `.value`; `.hz` is the measured frame arrival rate and `.timestamp` is
 the local `time.monotonic()` of the most recent frame. `value` is `None` when there is
 no frame yet.
@@ -613,7 +613,7 @@ Get the latest robot state.
 **Parameters:**
 
 - `refresh` (bool): In the SDK, `refresh=False` returns the last frame *this caller*
-  read — litearm-core has no background reader thread, so a `False` read can be stale.
+  read — litearm-python has no background reader thread, so a `False` read can be stale.
   The simulation always has a fresh frame and returns it either way; pass `refresh=True`
   when you mean "right now" so the code reads the same against both backends.
 - `timeout` (float): Accepted for compatibility; the simulation always answers.
@@ -955,10 +955,10 @@ follows the physical one.
 **Parameters:**
 
 - `real_arm` (Any): Anything answering `get_state(refresh=True)` with a `Msg` whose
-  `value.q` is the joint vector — normally a connected `litearm_core.Arm`.
+  `value.q` is the joint vector — normally a connected `litearm.Arm`.
 - `rate_hz` (float): How often to poll. **Every frame is a serial round trip**, so this
   is real load on the wire, not a display preference. The default 50 Hz is deliberate;
-  litearm-core has no background reader, and polling at the 500 Hz physics rate would
+  litearm-python has no background reader, and polling at the 500 Hz physics rate would
   swamp the link.
 
 The read is `refresh=True` on purpose: `refresh=False` would hand back the last frame
@@ -973,7 +973,7 @@ Do not send commands to `real_arm` yourself while mirroring: the two readers ste
 other's frames. Call `stop_mirroring()` first.
 
 ```python
-import litearm_core as pa
+import litearm as pa
 real = pa.Arm(port="/dev/ttyACM0").connect()
 sim = PyBulletArm(render=True).connect()
 sim.mirror_from(real)
@@ -1074,10 +1074,10 @@ with PyBulletArm(render=True) as arm:
 ### Mode 2: Mirror Mode
 
 Simulation tracks the real arm's state in real time. Requires a connected
-`litearm-core` (`pip install -e ../litearm-core`).
+`litearm-python` (`pip install -e ../litearm-python`).
 
 ```python
-import litearm_core as pa
+import litearm as pa
 from litearm_pybullet import PyBulletArm
 
 # Connect to the real arm
@@ -1101,7 +1101,7 @@ real.close()
 Alternatively, use the `MirrorMode` class:
 
 ```python
-import litearm_core as pa
+import litearm as pa
 from litearm_pybullet import PyBulletArm, MirrorMode
 
 real = pa.Arm(port=None).connect()
@@ -1239,8 +1239,8 @@ Replace the import and constructor:
 
 ```python
 # Real arm
-import litearm_core
-arm = litearm_core.Arm(port="/dev/ttyACM0").connect()
+import litearm
+arm = litearm.Arm(port="/dev/ttyACM0").connect()
 
 # Simulation
 from litearm_pybullet import PyBulletArm
@@ -1264,7 +1264,7 @@ arm.set_gains(kp=[150]*7, kd=[8]*7)
 The IK solver uses PyBullet's built-in IK plus Levenberg-Marquardt refinement. If the
 target pose is unreachable (outside the workspace, or in a singular configuration) it
 raises `IKError`. Try a better `q_seed` or a different target pose. Note that
-`IKError` derives from `litearm_core`'s error hierarchy when the SDK is installed, so
+`IKError` derives from `litearm`'s error hierarchy when the SDK is installed, so
 one `except` clause covers simulation and hardware.
 
 ### Q: Why did `movej` raise `MotionTimeoutError`?
@@ -1286,7 +1286,7 @@ traj.save("trajectories/demo.json")
 arm.play_trajectory("trajectories/demo.json", speed=1.0)
 ```
 
-Trajectories are a simulation-only concept — `litearm-core` has no trajectory object.
+Trajectories are a simulation-only concept — `litearm-python` has no trajectory object.
 
 ### Q: Can I use numpy arrays for poses?
 
@@ -1328,7 +1328,7 @@ exception.
 
 ### Optional Dependencies (mirror/dual mode)
 
-- `litearm-core` — not on PyPI; install with `pip install -e ../litearm-core`
+- `litearm-python` — not on PyPI; install with `pip install -e ../litearm-python`
 
 ## Known Limitations
 
@@ -1342,13 +1342,15 @@ exception.
 
 ## Migrating from 0.1 (the litearm-python era)
 
-The real-arm backend used to be the Zenoh-based `litearm-python` 0.1.0. It is now
-`litearm-core` (USB CDC straight to the firmware), and the simulation API follows it.
+The distribution name `litearm-python` covers two SDKs that share only the import
+line. 0.1.0 was a Zenoh client that talked to a separate `litearm-server` process,
+addressed with `endpoint=`/`arm_id=`. 2.1 is a thin client that speaks the firmware's
+protocol over USB CDC, and its constructor takes `port=`. The backend here uses 2.1.
 
-| 0.1 | now |
+| 0.1 (server-era) | 2.1 (USB CDC) |
 |---|---|
-| `import litearm` | `import litearm_core` |
-| `litearm.Arm(endpoint="tcp/host:7447", arm_id="armA")` | `litearm_core.Arm(port="/dev/ttyACM0")` |
+| `litearm-python` 0.1.0, `import litearm` | `litearm-python` 2.1, the same `import litearm` |
+| `litearm.Arm(endpoint="tcp/host:7447", arm_id="armA")` | `litearm.Arm(port="/dev/ttyACM0")` |
 | `DualArm(real_endpoint=..., real_arm_id=...)` | `DualArm(real_port=...)` |
 | `arm.start()` | `arm.connect()` (still an alias, but deprecated in spirit) |
 | `state = arm.get_state(); state["q"]` | `arm.get_state().value.q` |

@@ -1,12 +1,12 @@
 # litearm-pybullet
 
-LiteArm 七轴机械臂 PyBullet 仿真。与 [`litearm-core`](https://github.com/nexform-tech/litearm-core)
-SDK 逐项对齐——把 `litearm_core.Arm(port=...)` 换成 `PyBulletArm(render=True)`，
+LiteArm 七轴机械臂 PyBullet 仿真。与 [`litearm-python`](https://github.com/nexform-tech/litearm-python)
+SDK 逐项对齐——把 `litearm.Arm(port=...)` 换成 `PyBulletArm(render=True)`，
 同一份控制代码在仿真和实机上都跑得起来。也支持仿真与实体机械臂同时运动。
 
 ## 特点
 
-- 🔄 **与 litearm-core 1:1 对齐**：31 个方法名、形参、默认值、`Msg` 信封、
+- 🔄 **与 litearm-python 1:1 对齐**：31 个方法名、形参、默认值、`Msg` 信封、
   `RobotState`/`CartPlan` 返回类型全部一致，`PyBulletArm` 可直接替换 `Arm`
 - 🖥️ **三种模式**：独立仿真 / 镜像跟随 / 双控同步
 - 🎮 **可视化**：PyBullet 原生渲染，实时观察机械臂运动
@@ -31,15 +31,15 @@ cd litearm-pybullet
 pip install -e ".[dev]"
 ```
 
-**镜像/双控模式依赖 `litearm-core`，它还没有上 PyPI。** `[mirror]` extra 里写的就是
+**镜像/双控模式依赖 `litearm-python`，它还没有上 PyPI。** `[mirror]` extra 里写的就是
 这个名字，但它在 PyPI 上解析不到，所以要先从源码装一次：
 
 ```bash
-pip install -e ../litearm-core      # 同级目录的源码
-pip install -e ".[mirror]"          # 或者干脆 PYTHONPATH=../litearm-core/src
+pip install -e ../litearm-python      # 同级目录的源码
+pip install -e ".[mirror]"          # 或者干脆 PYTHONPATH=../litearm-python/src
 ```
 
-独立仿真不需要它：`litearm_pybullet.HAS_LITEARM_CORE` 告诉你真 SDK 有没有 import 成功，
+独立仿真不需要它：`litearm_pybullet.HAS_LITEARM` 告诉你真 SDK 有没有 import 成功，
 独立仿真永远不依赖它。
 
 ## 快速开始
@@ -65,10 +65,10 @@ with PyBulletArm(render=True) as arm:            # 等价于 connect()
 ### 模式 2：镜像模式 — 仿真跟随实臂
 
 ```python
-from litearm_pybullet import PyBulletArm, litearm_core   # 需要装 litearm-core
+from litearm_pybullet import PyBulletArm, litearm   # 需要装 litearm-python
 
 # 连接真实机械臂。走 USB CDC，没有 server / endpoint 这一层
-real = litearm_core.Arm(port=None).connect()             # None = 自动查找
+real = litearm.Arm(port=None).connect()             # None = 自动查找
 
 # 创建仿真并启动镜像
 sim = PyBulletArm(render=True).connect()
@@ -98,7 +98,7 @@ dual.close()
 ┌─────────────────────────────────────────────────┐
 │                  你的 Python 程序                │
 │                                                   │
-│   arm = PyBulletArm()  ← 可替换为 litearm_core.Arm │
+│   arm = PyBulletArm()  ← 可替换为 litearm.Arm │
 │   arm.movej(...)                                  │
 │   arm.get_state()                                 │
 └──────────┬────────────────────┬─────────────────┘
@@ -107,7 +107,7 @@ dual.close()
     │ 独立仿真     │      │ 双控 / 镜像     │
     │             │      │                │
     │ PyBullet    │      │ PyBullet +     │
-    │ 物理引擎    │      │ litearm-core   │
+    │ 物理引擎    │      │ litearm-python   │
     │             │      │ (USB CDC)      │
     │ PID 控制器  │      │                │
     │ FK/IK      │      │  实臂 + 仿真   │
@@ -139,9 +139,9 @@ python3 examples/05_dual_control.py --port /dev/ttyACM0
 `tests/test_api_parity.py` 对着真实安装的 SDK 钉住。第二层是仿真独有的能力，
 SDK 里没有对应物。第三层是 0.1 时代的老名字，保留给老调用方，正在退场。
 
-### 与 `litearm_core.Arm` 1:1（31 个）
+### 与 `litearm.Arm` 1:1（31 个）
 
-| `litearm_core.Arm` | `PyBulletArm` | 说明 |
+| `litearm.Arm` | `PyBulletArm` | 说明 |
 |---|---|---|
 | `Arm(port=...)` | `PyBulletArm(render=True)` | 构造；仿真这边多一个 `render`，连接走 `connect(port=None)` |
 | `connect(port=None)` / `disconnect()` / `close()` | 同 | |
@@ -205,13 +205,15 @@ SDK 里没有对应物，是仿真额外提供的能力。值得知道的几组�
 
 ## 从 0.1（litearm-python 时代）迁移
 
-真机后端原来是 Zenoh 版的 `litearm-python` 0.1.0，现在换成 `litearm-core`
-（USB CDC 直连固件），仿真侧 API 跟着对齐。迁移基本是机械替换：
+`litearm-python` 这个名字底下是两个只共享 `import` 一行的 SDK：0.1.0 是 Zenoh
+客户端，对的是一个独立的 `litearm-server` 进程，用 `endpoint=`/`arm_id=` 寻址；
+2.1 是薄客户端，直接走 USB CDC 说固件协议，构造参数是 `port=`。本仓真机后端
+用的是 2.1，仿真侧 API 跟着对齐，所以迁移基本是机械替换：
 
-| 0.1 | 现在 |
+| 0.1（server 时代） | 2.1（USB CDC） |
 |---|---|
-| `import litearm` | `import litearm_core` |
-| `litearm.Arm(endpoint="tcp/host:7447", arm_id="armA")` | `litearm_core.Arm(port="/dev/ttyACM0")` |
+| `litearm-python` 0.1.0，`import litearm` | `litearm-python` 2.1，还是 `import litearm` |
+| `litearm.Arm(endpoint="tcp/host:7447", arm_id="armA")` | `litearm.Arm(port="/dev/ttyACM0")` |
 | `DualArm(real_endpoint=..., real_arm_id=...)` | `DualArm(real_port=...)` |
 | `arm.start()` | `arm.connect()`（别名还在，但不建议继续用） |
 | `state = arm.get_state(); state["q"]` | `arm.get_state().value.q` |
